@@ -68,6 +68,8 @@ const ELICITATION_MESSAGE: &str = "Allow this request?";
 const URL_ELICITATION_TRIGGER_MESSAGE: &str = "auth";
 const URL_ELICITATION_MESSAGE: &str = "Sign in to GitHub to continue.";
 const URL_ELICITATION_URL: &str = "https://github.example/login/device";
+#[cfg(unix)]
+const CHANNEL_SERVER_NAME: &str = "channel_server";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_server_tool_call_returns_tool_result() -> Result<()> {
@@ -530,6 +532,110 @@ url = "{mcp_server_url}/mcp"
 
     mcp_server_handle.abort();
     let _ = mcp_server_handle.await;
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stdio_mcp_channel_notification_reaches_app_server_thread() -> Result<()> {
+    let responses_server = responses::start_mock_server().await;
+    responses::mount_sse_once(
+        &responses_server,
+        responses::sse(vec![
+            responses::ev_response_created("resp-1"),
+            responses::ev_assistant_message("msg-1", "Done"),
+            responses::ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+
+    let codex_home = TempDir::new()?;
+    write_mock_responses_config_toml(
+        codex_home.path(),
+        &responses_server.uri(),
+        &BTreeMap::new(),
+        /*auto_compact_limit*/ 1024,
+        /*requires_openai_auth*/ None,
+        "mock_provider",
+        "compact",
+    )?;
+
+    let script_path = codex_home.path().join("channel_server.sh");
+    std::fs::write(
+        &script_path,
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-06-18","capabilities":{"experimental":{"codex/channel":{}},"tools":{"listChanged":true}},"serverInfo":{"name":"channel-server","version":"0.0.0"},"instructions":"test channel server"}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id"
+      printf '{"jsonrpc":"2.0","method":"notifications/codex/channel","params":{"content":"hello desktop","meta":{"ack_required":"true","arrived_on_channel":"desk","from":"talk-test","id":"msg-1","reply_to_channel":"user","sent_at":"1710000000000"}}}\n'
+      ;;
+  esac
+done
+"#,
+    )?;
+
+    let script_arg = serde_json::to_string(script_path.to_string_lossy().as_ref())?;
+    let config_path = codex_home.path().join("config.toml");
+    let mut config_toml = std::fs::read_to_string(&config_path)?;
+    config_toml.push_str(&format!(
+        r#"
+[mcp_servers.{CHANNEL_SERVER_NAME}]
+command = "sh"
+args = [{script_arg}]
+"#
+    ));
+    std::fs::write(config_path, config_toml)?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_start_id = mcp
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_start_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_start_id)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response(thread_start_resp)?;
+
+    let completed_notif = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("item/completed"),
+    )
+    .await??;
+    let completed: ItemCompletedNotification = serde_json::from_value(
+        completed_notif
+            .params
+            .expect("item/completed params must be present"),
+    )?;
+    assert_eq!(completed.thread_id, thread.id);
+
+    let ThreadItem::UserMessage { content, .. } = completed.item else {
+        panic!("expected completed user message item");
+    };
+    assert_eq!(
+        content,
+        vec![V2UserInput::Text {
+            text: "<channel source=\"channel_server\" ack_required=\"true\" arrived_on_channel=\"desk\" from=\"talk-test\" id=\"msg-1\" reply_to_channel=\"user\" sent_at=\"1710000000000\">hello desktop</channel>".to_string(),
+            text_elements: Vec::new(),
+        }]
+    );
+
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
 
     Ok(())
 }
