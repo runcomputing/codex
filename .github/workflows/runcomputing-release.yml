@@ -1,0 +1,137 @@
+name: runcomputing-release
+
+# Build the runcomputing/codex fork's `codex` binary (which carries the talk
+# channel-notification changes) as ready-to-run prebuilt binaries for the two
+# platforms we ship — Apple Silicon macOS and x86_64 Linux (musl, fully static) —
+# and attach them to a GitHub Release so devx's install.sh can download a binary
+# instead of compiling from source.
+#
+# This is a trimmed port of the upstream rust-release.yml build job onto
+# GitHub-hosted runners. It REUSES the fork's own setup-rusty-v8 action and
+# install-musl-build-tools.sh, but drops codesigning, DMGs, symbol archives, the
+# app-server bundle, the Cargo.toml version-tag gate, and the self-hosted runners.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. rust-v0.142.2-patched)"
+        required: true
+        default: rust-v0.142.2-patched
+  push:
+    tags:
+      # A patched release tag = an upstream stable tag + our channel patch.
+      - "*-patched"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: runcomputing-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_TERM_COLOR: always
+      # macOS release builds pack split debuginfo (matches upstream).
+      CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: ${{ contains(matrix.target, 'apple-darwin') && 'packed' || 'off' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # setup-rusty-v8 runs a Python script that imports tomllib (stdlib only in
+      # 3.11+); ubuntu-22.04's default python3 is 3.10, so pin a modern one.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils pkg-config libcap-dev
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+          targets: ${{ matrix.target }}
+
+      - name: Use hermetic Cargo home (musl)
+        if: contains(matrix.target, 'musl')
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+          : > "${cargo_home}/config.toml"
+
+      - name: Install Zig (musl)
+        if: contains(matrix.target, 'musl')
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Install musl build tools
+        if: contains(matrix.target, 'musl')
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Disable aws-lc jitter entropy (musl)
+        if: contains(matrix.target, 'musl')
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          v="AWS_LC_SYS_NO_JITTER_ENTROPY_${{ matrix.target }}"
+          echo "${v//-/_}=1" >> "$GITHUB_ENV"
+
+      - name: Configure rusty_v8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Build bwrap and export digest (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          cargo build --release --target "${{ matrix.target }}" --bin bwrap
+          p="target/${{ matrix.target }}/release/bwrap"
+          strip --strip-debug --strip-unneeded "$p"
+          echo "CODEX_BWRAP_SHA256=$(sha256sum "$p" | awk '{print $1}')" >> "$GITHUB_ENV"
+
+      - name: Build codex
+        run: cargo build --release --target "${{ matrix.target }}" -p codex-cli --bin codex
+
+      - name: Stage asset
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/codex" "dist/codex-${{ matrix.target }}"
+          chmod +x "dist/codex-${{ matrix.target }}"
+
+      - name: Publish to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: codex-rs/dist/codex-${{ matrix.target }}
+          fail_on_unmatched_files: true
