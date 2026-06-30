@@ -1,0 +1,1311 @@
+diff --git a/codex-rs/app-server/tests/suite/v2/mcp_tool.rs b/codex-rs/app-server/tests/suite/v2/mcp_tool.rs
+index 07c2e9fed..ce5f78fba 100644
+--- a/codex-rs/app-server/tests/suite/v2/mcp_tool.rs
++++ b/codex-rs/app-server/tests/suite/v2/mcp_tool.rs
+@@ -68,6 +68,8 @@ const ELICITATION_MESSAGE: &str = "Allow this request?";
+ const URL_ELICITATION_TRIGGER_MESSAGE: &str = "auth";
+ const URL_ELICITATION_MESSAGE: &str = "Sign in to GitHub to continue.";
+ const URL_ELICITATION_URL: &str = "https://github.example/login/device";
++#[cfg(unix)]
++const CHANNEL_SERVER_NAME: &str = "channel_server";
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn mcp_server_tool_call_returns_tool_result() -> Result<()> {
+@@ -534,6 +536,110 @@ url = "{mcp_server_url}/mcp"
+     Ok(())
+ }
+ 
++#[cfg(unix)]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn stdio_mcp_channel_notification_reaches_app_server_thread() -> Result<()> {
++    let responses_server = responses::start_mock_server().await;
++    responses::mount_sse_once(
++        &responses_server,
++        responses::sse(vec![
++            responses::ev_response_created("resp-1"),
++            responses::ev_assistant_message("msg-1", "Done"),
++            responses::ev_completed("resp-1"),
++        ]),
++    )
++    .await;
++
++    let codex_home = TempDir::new()?;
++    write_mock_responses_config_toml(
++        codex_home.path(),
++        &responses_server.uri(),
++        &BTreeMap::new(),
++        /*auto_compact_limit*/ 1024,
++        /*requires_openai_auth*/ None,
++        "mock_provider",
++        "compact",
++    )?;
++
++    let script_path = codex_home.path().join("channel_server.sh");
++    std::fs::write(
++        &script_path,
++        r#"#!/bin/sh
++while IFS= read -r line; do
++  id=$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')
++  case "$line" in
++    *'"method":"initialize"'*)
++      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-06-18","capabilities":{"experimental":{"codex/channel":{}},"tools":{"listChanged":true}},"serverInfo":{"name":"channel-server","version":"0.0.0"},"instructions":"test channel server"}}\n' "$id"
++      ;;
++    *'"method":"tools/list"'*)
++      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id"
++      printf '{"jsonrpc":"2.0","method":"notifications/codex/channel","params":{"content":"hello desktop","meta":{"ack_required":"true","arrived_on_channel":"desk","from":"talk-test","id":"msg-1","reply_to_channel":"user","sent_at":"1710000000000"}}}\n'
++      ;;
++  esac
++done
++"#,
++    )?;
++
++    let script_arg = serde_json::to_string(script_path.to_string_lossy().as_ref())?;
++    let config_path = codex_home.path().join("config.toml");
++    let mut config_toml = std::fs::read_to_string(&config_path)?;
++    config_toml.push_str(&format!(
++        r#"
++[mcp_servers.{CHANNEL_SERVER_NAME}]
++command = "sh"
++args = [{script_arg}]
++"#
++    ));
++    std::fs::write(config_path, config_toml)?;
++
++    let mut mcp = TestAppServer::new(codex_home.path()).await?;
++    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
++
++    let thread_start_id = mcp
++        .send_thread_start_request(ThreadStartParams {
++            model: Some("mock-model".to_string()),
++            ..Default::default()
++        })
++        .await?;
++    let thread_start_resp: JSONRPCResponse = timeout(
++        DEFAULT_READ_TIMEOUT,
++        mcp.read_stream_until_response_message(RequestId::Integer(thread_start_id)),
++    )
++    .await??;
++    let ThreadStartResponse { thread, .. } = to_response(thread_start_resp)?;
++
++    let completed_notif = timeout(
++        DEFAULT_READ_TIMEOUT,
++        mcp.read_stream_until_notification_message("item/completed"),
++    )
++    .await??;
++    let completed: ItemCompletedNotification = serde_json::from_value(
++        completed_notif
++            .params
++            .expect("item/completed params must be present"),
++    )?;
++    assert_eq!(completed.thread_id, thread.id);
++
++    let ThreadItem::UserMessage { content, .. } = completed.item else {
++        panic!("expected completed user message item");
++    };
++    assert_eq!(
++        content,
++        vec![V2UserInput::Text {
++            text: "<channel source=\"channel_server\" ack_required=\"true\" arrived_on_channel=\"desk\" from=\"talk-test\" id=\"msg-1\" reply_to_channel=\"user\" sent_at=\"1710000000000\">hello desktop</channel>".to_string(),
++            text_elements: Vec::new(),
++        }]
++    );
++
++    timeout(
++        DEFAULT_READ_TIMEOUT,
++        mcp.read_stream_until_notification_message("turn/completed"),
++    )
++    .await??;
++
++    Ok(())
++}
++
+ #[derive(Clone, Default)]
+ struct ToolAppsMcpServer;
+ 
+diff --git a/codex-rs/codex-mcp/src/channel.rs b/codex-rs/codex-mcp/src/channel.rs
+new file mode 100644
+index 000000000..f6e613df5
+--- /dev/null
++++ b/codex-rs/codex-mcp/src/channel.rs
+@@ -0,0 +1,87 @@
++use std::collections::BTreeMap;
++
++use rmcp::model::CustomNotification;
++use serde_json::Value;
++use thiserror::Error;
++
++pub const MCP_CHANNEL_CAPABILITY: &str = "codex/channel";
++pub const MCP_CHANNEL_NOTIFICATION_METHOD: &str = "notifications/codex/channel";
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct McpChannelNotification {
++    pub source: String,
++    pub content: String,
++    pub meta: BTreeMap<String, String>,
++}
++
++#[derive(Debug, Error, PartialEq, Eq)]
++pub enum McpChannelNotificationParseError {
++    #[error("missing params")]
++    MissingParams,
++    #[error("params must be a JSON object")]
++    InvalidParams,
++    #[error("params.content must be a string")]
++    InvalidContent,
++}
++
++impl McpChannelNotification {
++    pub(crate) fn from_custom_notification(
++        source: &str,
++        notification: &CustomNotification,
++    ) -> Option<Result<Self, McpChannelNotificationParseError>> {
++        if notification.method != MCP_CHANNEL_NOTIFICATION_METHOD {
++            return None;
++        }
++
++        Some(parse_channel_notification(
++            source,
++            notification.params.as_ref(),
++        ))
++    }
++}
++
++fn parse_channel_notification(
++    source: &str,
++    params: Option<&Value>,
++) -> Result<McpChannelNotification, McpChannelNotificationParseError> {
++    let Some(params) = params else {
++        return Err(McpChannelNotificationParseError::MissingParams);
++    };
++    let Value::Object(params) = params else {
++        return Err(McpChannelNotificationParseError::InvalidParams);
++    };
++    let Some(content) = params.get("content").and_then(Value::as_str) else {
++        return Err(McpChannelNotificationParseError::InvalidContent);
++    };
++
++    let meta = params
++        .get("meta")
++        .and_then(Value::as_object)
++        .into_iter()
++        .flat_map(|meta| meta.iter())
++        .filter_map(|(key, value)| {
++            if is_valid_channel_meta_key(key) {
++                value.as_str().map(|value| (key.clone(), value.to_string()))
++            } else {
++                None
++            }
++        })
++        .collect();
++
++    Ok(McpChannelNotification {
++        source: source.to_string(),
++        content: content.to_string(),
++        meta,
++    })
++}
++
++fn is_valid_channel_meta_key(key: &str) -> bool {
++    key != "source"
++        && !key.is_empty()
++        && key
++            .chars()
++            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
++}
++#[cfg(test)]
++#[path = "channel_tests.rs"]
++mod tests;
+diff --git a/codex-rs/codex-mcp/src/channel_tests.rs b/codex-rs/codex-mcp/src/channel_tests.rs
+new file mode 100644
+index 000000000..febd7a88b
+--- /dev/null
++++ b/codex-rs/codex-mcp/src/channel_tests.rs
+@@ -0,0 +1,55 @@
++use std::collections::BTreeMap;
++
++use pretty_assertions::assert_eq;
++use rmcp::model::CustomNotification;
++use serde_json::json;
++
++use super::*;
++
++#[test]
++fn parses_channel_notification_params() {
++    let notification = CustomNotification::new(
++        MCP_CHANNEL_NOTIFICATION_METHOD,
++        Some(json!({
++            "content": "hello",
++            "meta": {
++                "ack_required": "true",
++                "arrived_on_channel": "worker-room",
++                "reply_to_channel": "sender-room",
++                "source": "server-supplied-source-is-dropped",
++                "sent_at": "1710000000000",
++                "bad-key": "dropped",
++                "not_string": 5,
++            },
++        })),
++    );
++
++    assert_eq!(
++        McpChannelNotification::from_custom_notification("talk", &notification)
++            .expect("method should match")
++            .expect("params should parse"),
++        McpChannelNotification {
++            source: "talk".to_string(),
++            content: "hello".to_string(),
++            meta: BTreeMap::from([
++                ("ack_required".to_string(), "true".to_string()),
++                ("arrived_on_channel".to_string(), "worker-room".to_string()),
++                ("reply_to_channel".to_string(), "sender-room".to_string()),
++                ("sent_at".to_string(), "1710000000000".to_string()),
++            ]),
++        }
++    );
++}
++
++#[test]
++fn ignores_other_custom_notifications() {
++    let notification = CustomNotification::new(
++        "notifications/talk/message",
++        Some(json!({ "content": "hello" })),
++    );
++
++    assert_eq!(
++        McpChannelNotification::from_custom_notification("talk", &notification),
++        None
++    );
++}
+diff --git a/codex-rs/codex-mcp/src/connection_manager.rs b/codex-rs/codex-mcp/src/connection_manager.rs
+index ea55d2137..12d390873 100644
+--- a/codex-rs/codex-mcp/src/connection_manager.rs
++++ b/codex-rs/codex-mcp/src/connection_manager.rs
+@@ -14,6 +14,7 @@ use std::time::Duration;
+ use std::time::Instant;
+ 
+ use crate::McpAuthStatusEntry;
++use crate::channel::McpChannelNotification;
+ use crate::codex_apps::CodexAppsToolsCacheContext;
+ use crate::codex_apps::CodexAppsToolsCacheKey;
+ use crate::codex_apps::write_cached_codex_apps_tools_if_needed;
+@@ -137,6 +138,7 @@ impl McpConnectionManager {
+         tool_plugin_provenance: ToolPluginProvenance,
+         auth: Option<&CodexAuth>,
+         elicitation_reviewer: Option<ElicitationReviewerHandle>,
++        channel_notification_tx: Option<Sender<McpChannelNotification>>,
+     ) -> Self {
+         let mut required_servers = mcp_servers
+             .iter()
+@@ -211,6 +213,7 @@ impl McpConnectionManager {
+                 runtime_auth_provider,
+                 client_elicitation_capability.clone(),
+                 supports_openai_form_elicitation,
++                channel_notification_tx.clone(),
+             );
+             clients.insert(server_name.clone(), async_managed_client.clone());
+             let tx_event = tx_event.clone();
+diff --git a/codex-rs/codex-mcp/src/connection_manager_tests.rs b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+index 52194b07f..a7f4448fc 100644
+--- a/codex-rs/codex-mcp/src/connection_manager_tests.rs
++++ b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+@@ -1283,6 +1283,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
+         ToolPluginProvenance::default(),
+         /*auth*/ None,
+         /*elicitation_reviewer*/ None,
++        /*channel_notification_tx*/ None,
+     )
+     .await;
+ 
+diff --git a/codex-rs/codex-mcp/src/lib.rs b/codex-rs/codex-mcp/src/lib.rs
+index b56a4f907..c3a47949c 100644
+--- a/codex-rs/codex-mcp/src/lib.rs
++++ b/codex-rs/codex-mcp/src/lib.rs
+@@ -1,3 +1,6 @@
++pub use channel::MCP_CHANNEL_CAPABILITY;
++pub use channel::MCP_CHANNEL_NOTIFICATION_METHOD;
++pub use channel::McpChannelNotification;
+ pub use connection_manager::McpConnectionManager;
+ pub use connection_manager::tool_is_model_visible;
+ pub use elicitation::ElicitationReviewRequest;
+@@ -72,6 +75,7 @@ pub use tools::declared_openai_file_input_param_names;
+ 
+ pub(crate) mod auth_elicitation;
+ mod catalog;
++pub(crate) mod channel;
+ pub(crate) mod codex_apps;
+ pub(crate) mod connection_manager;
+ pub(crate) mod elicitation;
+diff --git a/codex-rs/codex-mcp/src/mcp/mod.rs b/codex-rs/codex-mcp/src/mcp/mod.rs
+index 4076880c1..5c25617bd 100644
+--- a/codex-rs/codex-mcp/src/mcp/mod.rs
++++ b/codex-rs/codex-mcp/src/mcp/mod.rs
+@@ -309,6 +309,7 @@ pub async fn read_mcp_resource(
+         tool_plugin_provenance(config),
+         auth,
+         /*elicitation_reviewer*/ None,
++        /*channel_notification_tx*/ None,
+     )
+     .await;
+ 
+@@ -384,6 +385,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
+         tool_plugin_provenance,
+         auth,
+         /*elicitation_reviewer*/ None,
++        /*channel_notification_tx*/ None,
+     )
+     .await;
+ 
+diff --git a/codex-rs/codex-mcp/src/rmcp_client.rs b/codex-rs/codex-mcp/src/rmcp_client.rs
+index 6c8b9a241..66df28365 100644
+--- a/codex-rs/codex-mcp/src/rmcp_client.rs
++++ b/codex-rs/codex-mcp/src/rmcp_client.rs
+@@ -17,6 +17,8 @@ use std::sync::atomic::Ordering;
+ use std::time::Duration;
+ use std::time::Instant;
+ 
++use crate::channel::MCP_CHANNEL_CAPABILITY;
++use crate::channel::McpChannelNotification;
+ use crate::codex_apps::CachedCodexAppsToolsLoad;
+ use crate::codex_apps::CodexAppsToolsCacheContext;
+ use crate::codex_apps::load_cached_codex_apps_tools;
+@@ -51,9 +53,11 @@ use codex_exec_server::HttpClient;
+ use codex_exec_server::ReqwestHttpClient;
+ use codex_protocol::mcp::McpServerInfo;
+ use codex_protocol::protocol::Event;
++use codex_protocol::shell_environment::CODEX_THREAD_ID_ENV_VAR;
+ use codex_rmcp_client::ExecutorStdioServerLauncher;
+ use codex_rmcp_client::LocalStdioServerLauncher;
+ use codex_rmcp_client::RmcpClient;
++use codex_rmcp_client::SendCustomNotification;
+ use codex_rmcp_client::StdioServerLauncher;
+ use futures::future::BoxFuture;
+ use futures::future::FutureExt;
+@@ -154,6 +158,7 @@ impl AsyncManagedClient {
+         runtime_auth_provider: Option<SharedAuthProvider>,
+         client_elicitation_capability: ElicitationCapability,
+         supports_openai_form_elicitation: bool,
++        channel_notification_tx: Option<Sender<McpChannelNotification>>,
+     ) -> Self {
+         let tool_filter = server
+             .configured_config()
+@@ -170,6 +175,9 @@ impl AsyncManagedClient {
+             codex_apps_tools_cache_context.as_ref(),
+         );
+         let startup_tool_filter = tool_filter;
++        let server_uses_stdio = server.configured_config().is_some_and(|config| {
++            matches!(&config.transport, McpServerTransportConfig::Stdio { .. })
++        });
+         let startup_complete = Arc::new(AtomicBool::new(false));
+         let startup_complete_for_fut = Arc::clone(&startup_complete);
+         let cancel_token_for_fut = cancel_token.clone();
+@@ -208,6 +216,8 @@ impl AsyncManagedClient {
+                         codex_apps_tools_cache_context,
+                         client_elicitation_capability,
+                         supports_openai_form_elicitation,
++                        channel_notification_tx,
++                        server_uses_stdio,
+                     },
+                 )
+                 .await
+@@ -485,6 +495,8 @@ async fn start_server_task(
+         codex_apps_tools_cache_context,
+         client_elicitation_capability,
+         supports_openai_form_elicitation,
++        channel_notification_tx,
++        server_uses_stdio,
+     } = params;
+     let params = mcp_initialize_request_params(
+         client_elicitation_capability,
+@@ -492,11 +504,42 @@ async fn start_server_task(
+     );
+ 
+     let send_elicitation = elicitation_requests.make_sender(server_name.clone(), tx_event);
++    let channel_notifications_enabled = Arc::new(AtomicBool::new(false));
++    let send_custom_notification = channel_notification_tx.map(|tx| {
++        make_channel_notification_sender(
++            server_name.clone(),
++            tx,
++            Arc::clone(&channel_notifications_enabled),
++        )
++    });
++
++    let initialize_result = match send_custom_notification {
++        Some(send_custom_notification) => {
++            client
++                .initialize_with_custom_notification_handler(
++                    params,
++                    startup_timeout,
++                    send_elicitation,
++                    send_custom_notification,
++                )
++                .await
++        }
++        None => {
++            client
++                .initialize(params, startup_timeout, send_elicitation)
++                .await
++        }
++    }
++    .map_err(StartupOutcomeError::from)?;
+ 
+-    let initialize_result = client
+-        .initialize(params, startup_timeout, send_elicitation)
+-        .await
+-        .map_err(StartupOutcomeError::from)?;
++    let server_supports_channel_notifications = server_uses_stdio
++        && initialize_result
++            .capabilities
++            .experimental
++            .as_ref()
++            .and_then(|exp| exp.get(MCP_CHANNEL_CAPABILITY))
++            .is_some();
++    channel_notifications_enabled.store(server_supports_channel_notifications, Ordering::Release);
+ 
+     let server_supports_sandbox_state_meta_capability = initialize_result
+         .capabilities
+@@ -593,6 +636,44 @@ struct StartServerTaskParams {
+     codex_apps_tools_cache_context: Option<CodexAppsToolsCacheContext>,
+     client_elicitation_capability: ElicitationCapability,
+     supports_openai_form_elicitation: bool,
++    channel_notification_tx: Option<Sender<McpChannelNotification>>,
++    server_uses_stdio: bool,
++}
++
++fn make_channel_notification_sender(
++    server_name: String,
++    tx: Sender<McpChannelNotification>,
++    enabled: Arc<AtomicBool>,
++) -> SendCustomNotification {
++    Box::new(move |notification| {
++        let server_name = server_name.clone();
++        let tx = tx.clone();
++        let enabled = Arc::clone(&enabled);
++        async move {
++            if !enabled.load(Ordering::Acquire) {
++                return Ok(());
++            }
++
++            let Some(notification) =
++                McpChannelNotification::from_custom_notification(&server_name, &notification)
++            else {
++                return Ok(());
++            };
++
++            match notification {
++                Ok(notification) => {
++                    if tx.send(notification).await.is_err() {
++                        warn!("dropping MCP channel notification because session receiver closed");
++                    }
++                }
++                Err(err) => {
++                    warn!("dropping invalid MCP channel notification from '{server_name}': {err}");
++                }
++            }
++            Ok(())
++        }
++        .boxed()
++    })
+ }
+ 
+ async fn make_rmcp_client(
+@@ -622,11 +703,7 @@ async fn make_rmcp_client(
+         } => {
+             let command_os: OsString = command.into();
+             let args_os: Vec<OsString> = args.into_iter().map(Into::into).collect();
+-            let env_os = env.map(|env| {
+-                env.into_iter()
+-                    .map(|(key, value)| (key.into(), value.into()))
+-                    .collect::<HashMap<_, _>>()
+-            });
++            let env_os = stdio_env_with_runtime_context(env, &runtime_context);
+             let launcher = if is_local_environment {
+                 // TODO(starr): Unify local stdio MCP launch with
+                 // `ExecutorStdioServerLauncher` once the executor-backed path
+@@ -682,11 +759,40 @@ async fn make_rmcp_client(
+     }
+ }
+ 
++fn stdio_env_with_runtime_context(
++    env: Option<HashMap<String, String>>,
++    runtime_context: &McpRuntimeContext,
++) -> Option<HashMap<OsString, OsString>> {
++    let mut env_os = env
++        .map(|env| {
++            env.into_iter()
++                .map(|(key, value)| (key.into(), value.into()))
++                .collect::<HashMap<_, _>>()
++        })
++        .unwrap_or_default();
++
++    if let Some(thread_id) = runtime_context.thread_id() {
++        env_os.insert(
++            OsString::from(CODEX_THREAD_ID_ENV_VAR),
++            OsString::from(thread_id),
++        );
++    }
++
++    if env_os.is_empty() {
++        None
++    } else {
++        Some(env_os)
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use codex_exec_server::EnvironmentManager;
++    use pretty_assertions::assert_eq;
+     use rmcp::model::JsonObject;
+     use rmcp::model::Meta;
++    use std::path::PathBuf;
+ 
+     #[test]
+     fn mcp_initialize_advertises_openai_form_only_when_supported() {
+@@ -799,4 +905,51 @@ mod tests {
+             assert!(meta.0.contains_key(key), "{key} should be preserved");
+         }
+     }
++
++    #[test]
++    fn stdio_env_includes_runtime_thread_id() {
++        let runtime_context = McpRuntimeContext::new(
++            Arc::new(EnvironmentManager::without_environments()),
++            PathBuf::from("/tmp"),
++        )
++        .with_thread_id("thread-123");
++
++        let env = stdio_env_with_runtime_context(None, &runtime_context).expect("env overlay");
++
++        assert_eq!(
++            env.get(std::ffi::OsStr::new(CODEX_THREAD_ID_ENV_VAR)),
++            Some(&OsString::from("thread-123"))
++        );
++    }
++
++    #[test]
++    fn stdio_env_runtime_thread_id_overrides_configured_value() {
++        let runtime_context = McpRuntimeContext::new(
++            Arc::new(EnvironmentManager::without_environments()),
++            PathBuf::from("/tmp"),
++        )
++        .with_thread_id("actual-thread");
++        let configured_env = HashMap::from([
++            (
++                CODEX_THREAD_ID_ENV_VAR.to_string(),
++                "configured-thread".to_string(),
++            ),
++            (
++                "TALK_BROKER_URL".to_string(),
++                "http://127.0.0.1".to_string(),
++            ),
++        ]);
++
++        let env =
++            stdio_env_with_runtime_context(Some(configured_env), &runtime_context).expect("env");
++
++        assert_eq!(
++            env.get(std::ffi::OsStr::new(CODEX_THREAD_ID_ENV_VAR)),
++            Some(&OsString::from("actual-thread"))
++        );
++        assert_eq!(
++            env.get(std::ffi::OsStr::new("TALK_BROKER_URL")),
++            Some(&OsString::from("http://127.0.0.1"))
++        );
++    }
+ }
+diff --git a/codex-rs/codex-mcp/src/runtime.rs b/codex-rs/codex-mcp/src/runtime.rs
+index e52048349..7c8e00a8f 100644
+--- a/codex-rs/codex-mcp/src/runtime.rs
++++ b/codex-rs/codex-mcp/src/runtime.rs
+@@ -31,12 +31,14 @@ pub struct SandboxState {
+ /// Runtime context used when resolving per-server MCP environments.
+ ///
+ /// `McpConfig` describes what servers exist. This value carries the canonical
+-/// environment registry plus the local stdio fallback cwd used when a local
+-/// stdio server omits its own working directory.
++/// environment registry, the local stdio fallback cwd used when a local stdio
++/// server omits its own working directory, and optional session identity for
++/// servers launched in a thread context.
+ #[derive(Clone)]
+ pub struct McpRuntimeContext {
+     environment_manager: Arc<EnvironmentManager>,
+     local_stdio_fallback_cwd: PathBuf,
++    thread_id: Option<String>,
+ }
+ 
+ impl McpRuntimeContext {
+@@ -47,13 +49,25 @@ impl McpRuntimeContext {
+         Self {
+             environment_manager,
+             local_stdio_fallback_cwd,
++            thread_id: None,
+         }
+     }
+ 
++    /// Attach the Codex thread id for MCP servers launched on behalf of a
++    /// session.
++    pub fn with_thread_id(mut self, thread_id: impl Into<String>) -> Self {
++        self.thread_id = Some(thread_id.into());
++        self
++    }
++
+     pub(crate) fn local_stdio_fallback_cwd(&self) -> PathBuf {
+         self.local_stdio_fallback_cwd.clone()
+     }
+ 
++    pub(crate) fn thread_id(&self) -> Option<&str> {
++        self.thread_id.as_deref()
++    }
++
+     pub(crate) fn resolve_server_environment(
+         &self,
+         server_name: &str,
+diff --git a/codex-rs/core/src/connectors.rs b/codex-rs/core/src/connectors.rs
+index 86e5f07f9..1123f2911 100644
+--- a/codex-rs/core/src/connectors.rs
++++ b/codex-rs/core/src/connectors.rs
+@@ -282,6 +282,7 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
+         ToolPluginProvenance::default(),
+         auth.as_ref(),
+         /*elicitation_reviewer*/ None,
++        /*channel_notification_tx*/ None,
+     )
+     .await;
+ 
+diff --git a/codex-rs/core/src/context/mcp_channel_event.rs b/codex-rs/core/src/context/mcp_channel_event.rs
+new file mode 100644
+index 000000000..61efe237d
+--- /dev/null
++++ b/codex-rs/core/src/context/mcp_channel_event.rs
+@@ -0,0 +1,161 @@
++use std::collections::BTreeMap;
++
++use codex_mcp::McpChannelNotification;
++use codex_protocol::user_input::UserInput;
++use codex_utils_output_truncation::TruncationPolicy;
++use codex_utils_output_truncation::truncate_text;
++
++use super::ContextualUserFragment;
++
++const MAX_CHANNEL_CONTENT_TOKENS: usize = 8_000;
++const MAX_CHANNEL_META_ATTRIBUTES: usize = 32;
++const MAX_CHANNEL_META_VALUE_TOKENS: usize = 32;
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct McpChannelEvent {
++    source: String,
++    content: String,
++    meta: BTreeMap<String, String>,
++}
++
++impl McpChannelEvent {
++    pub(crate) fn into_user_input(self) -> UserInput {
++        UserInput::Text {
++            text: self.render(),
++            text_elements: Vec::new(),
++        }
++    }
++}
++
++impl From<McpChannelNotification> for McpChannelEvent {
++    fn from(value: McpChannelNotification) -> Self {
++        Self {
++            source: value.source,
++            content: value.content,
++            meta: value
++                .meta
++                .into_iter()
++                .filter(|(key, _)| key != "source")
++                .collect(),
++        }
++    }
++}
++
++impl ContextualUserFragment for McpChannelEvent {
++    fn role(&self) -> &'static str {
++        "user"
++    }
++
++    fn markers(&self) -> (&'static str, &'static str) {
++        Self::type_markers()
++    }
++
++    fn type_markers() -> (&'static str, &'static str) {
++        ("<channel", "</channel>")
++    }
++
++    fn body(&self) -> String {
++        let mut attributes = format!(" source=\"{}\"", xml_escape(&self.source));
++        for (key, value) in self.meta.iter().take(MAX_CHANNEL_META_ATTRIBUTES) {
++            let value = truncate_text(
++                value,
++                TruncationPolicy::Tokens(MAX_CHANNEL_META_VALUE_TOKENS),
++            );
++            attributes.push_str(&format!(" {key}=\"{}\"", xml_escape(&value)));
++        }
++
++        // Talk/Claude-style channel content is often XML-escaped before it
++        // reaches us. Decode it for readability, while preserving our wrapper
++        // boundary if the message body mentions a closing channel tag.
++        let content = decode_xml_entities(&self.content);
++        let content = truncate_text(
++            &content,
++            TruncationPolicy::Tokens(MAX_CHANNEL_CONTENT_TOKENS),
++        );
++        format!("{attributes}>{}", escape_channel_end_markers(&content))
++    }
++}
++
++fn xml_escape(value: &str) -> String {
++    let mut escaped = String::with_capacity(value.len());
++    for ch in value.chars() {
++        match ch {
++            '&' => escaped.push_str("&amp;"),
++            '<' => escaped.push_str("&lt;"),
++            '>' => escaped.push_str("&gt;"),
++            '"' => escaped.push_str("&quot;"),
++            '\'' => escaped.push_str("&apos;"),
++            _ => escaped.push(ch),
++        }
++    }
++    escaped
++}
++
++fn decode_xml_entities(value: &str) -> String {
++    let mut decoded = String::with_capacity(value.len());
++    let mut rest = value;
++    while let Some(amp_index) = rest.find('&') {
++        decoded.push_str(&rest[..amp_index]);
++        rest = &rest[amp_index..];
++        let Some(semicolon_index) = rest.find(';') else {
++            decoded.push_str(rest);
++            return decoded;
++        };
++
++        let entity = &rest[1..semicolon_index];
++        if let Some(ch) = decode_xml_entity(entity) {
++            decoded.push(ch);
++        } else {
++            decoded.push_str(&rest[..=semicolon_index]);
++        }
++        rest = &rest[semicolon_index + 1..];
++    }
++    decoded.push_str(rest);
++    decoded
++}
++
++fn decode_xml_entity(entity: &str) -> Option<char> {
++    match entity {
++        "amp" => Some('&'),
++        "apos" => Some('\''),
++        "gt" => Some('>'),
++        "lt" => Some('<'),
++        "quot" => Some('"'),
++        _ => decode_numeric_xml_entity(entity),
++    }
++}
++
++fn decode_numeric_xml_entity(entity: &str) -> Option<char> {
++    let codepoint = if let Some(hex) = entity
++        .strip_prefix("#x")
++        .or_else(|| entity.strip_prefix("#X"))
++    {
++        u32::from_str_radix(hex, 16).ok()?
++    } else {
++        entity.strip_prefix('#')?.parse().ok()?
++    };
++    char::from_u32(codepoint)
++}
++
++fn escape_channel_end_markers(value: &str) -> String {
++    const END_MARKER: &str = "</channel>";
++    let mut escaped = String::with_capacity(value.len());
++    let mut rest = value;
++    while let Some(index) = find_ascii_case_insensitive(rest, END_MARKER) {
++        escaped.push_str(&rest[..index]);
++        escaped.push_str("&lt;/channel&gt;");
++        rest = &rest[index + END_MARKER.len()..];
++    }
++    escaped.push_str(rest);
++    escaped
++}
++
++fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
++    haystack
++        .as_bytes()
++        .windows(needle.len())
++        .position(|candidate| candidate.eq_ignore_ascii_case(needle.as_bytes()))
++}
++#[cfg(test)]
++#[path = "mcp_channel_event_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/context/mcp_channel_event_tests.rs b/codex-rs/core/src/context/mcp_channel_event_tests.rs
+new file mode 100644
+index 000000000..8a1674980
+--- /dev/null
++++ b/codex-rs/core/src/context/mcp_channel_event_tests.rs
+@@ -0,0 +1,38 @@
++use std::collections::BTreeMap;
++
++use pretty_assertions::assert_eq;
++
++use super::ContextualUserFragment;
++use super::McpChannelEvent;
++
++#[test]
++fn renders_channel_xml_as_user_text() {
++    let event = McpChannelEvent {
++        source: "talk".to_string(),
++        content: "hello &lt;codex&gt; &quot;ok&quot;".to_string(),
++        meta: BTreeMap::from([
++            ("arrived_on_channel".to_string(), "worker room".to_string()),
++            ("from".to_string(), "A&B".to_string()),
++            ("reply_to_channel".to_string(), "sender room".to_string()),
++        ]),
++    };
++
++    assert_eq!(
++        event.render(),
++        "<channel source=\"talk\" arrived_on_channel=\"worker room\" from=\"A&amp;B\" reply_to_channel=\"sender room\">hello <codex> \"ok\"</channel>"
++    );
++}
++
++#[test]
++fn renders_readable_body_without_allowing_embedded_close_tag() {
++    let event = McpChannelEvent {
++        source: "talk".to_string(),
++        content: "body &lt;/channel&gt; still inside".to_string(),
++        meta: BTreeMap::new(),
++    };
++
++    assert_eq!(
++        event.render(),
++        "<channel source=\"talk\">body &lt;/channel&gt; still inside</channel>"
++    );
++}
+diff --git a/codex-rs/core/src/context/mod.rs b/codex-rs/core/src/context/mod.rs
+index 4ba6acf02..f33006f21 100644
+--- a/codex-rs/core/src/context/mod.rs
++++ b/codex-rs/core/src/context/mod.rs
+@@ -16,6 +16,7 @@ mod internal_model_context;
+ mod legacy_apply_patch_exec_command_warning;
+ mod legacy_model_mismatch_warning;
+ mod legacy_unified_exec_process_limit_warning;
++mod mcp_channel_event;
+ mod model_switch_instructions;
+ mod multi_agent_mode_instructions;
+ mod network_rule_saved;
+@@ -59,6 +60,7 @@ pub use internal_model_context::InvalidInternalContextSource;
+ pub(crate) use legacy_apply_patch_exec_command_warning::LegacyApplyPatchExecCommandWarning;
+ pub(crate) use legacy_model_mismatch_warning::LegacyModelMismatchWarning;
+ pub(crate) use legacy_unified_exec_process_limit_warning::LegacyUnifiedExecProcessLimitWarning;
++pub(crate) use mcp_channel_event::McpChannelEvent;
+ pub(crate) use model_switch_instructions::ModelSwitchInstructions;
+ pub(crate) use multi_agent_mode_instructions::MultiAgentModeInstructions;
+ pub(crate) use network_rule_saved::NetworkRuleSaved;
+diff --git a/codex-rs/core/src/mcp_tool_call_tests.rs b/codex-rs/core/src/mcp_tool_call_tests.rs
+index eb500b0f6..cc8403433 100644
+--- a/codex-rs/core/src/mcp_tool_call_tests.rs
++++ b/codex-rs/core/src/mcp_tool_call_tests.rs
+@@ -1361,6 +1361,7 @@ async fn install_host_owned_codex_apps_manager(session: &Session, turn_context:
+         codex_mcp::ToolPluginProvenance::default(),
+         auth.as_ref(),
+         /*elicitation_reviewer*/ None,
++        /*channel_notification_tx*/ None,
+     )
+     .await;
+     session
+diff --git a/codex-rs/core/src/session/mcp.rs b/codex-rs/core/src/session/mcp.rs
+index d03576aad..44173bb7c 100644
+--- a/codex-rs/core/src/session/mcp.rs
++++ b/codex-rs/core/src/session/mcp.rs
+@@ -338,7 +338,8 @@ impl Session {
+                 #[allow(deprecated)]
+                 turn_context.cwd.to_path_buf()
+             });
+-        let mcp_runtime_context = McpRuntimeContext::new(environment_manager, cwd);
++        let mcp_runtime_context = McpRuntimeContext::new(environment_manager, cwd)
++            .with_thread_id(self.thread_id.to_string());
+         let mcp_startup_cancellation_token = {
+             let mut guard = self.services.mcp_startup_cancellation_token.lock().await;
+             guard.cancel();
+@@ -368,6 +369,7 @@ impl Session {
+             tool_plugin_provenance,
+             auth.as_ref(),
+             elicitation_reviewer,
++            Some(self.services.mcp_channel_tx.clone()),
+         )
+         .await;
+         {
+diff --git a/codex-rs/core/src/session/mcp_channels.rs b/codex-rs/core/src/session/mcp_channels.rs
+new file mode 100644
+index 000000000..5d73d207f
+--- /dev/null
++++ b/codex-rs/core/src/session/mcp_channels.rs
+@@ -0,0 +1,46 @@
++use std::collections::BTreeMap;
++
++use async_channel::Receiver;
++use async_channel::Sender;
++use codex_mcp::McpChannelNotification;
++use codex_protocol::protocol::Op;
++use codex_protocol::protocol::Submission;
++use codex_protocol::protocol::ThreadSettingsOverrides;
++use tracing::debug;
++use uuid::Uuid;
++
++use crate::context::McpChannelEvent;
++
++pub(super) fn spawn_mcp_channel_notification_loop(
++    rx: Receiver<McpChannelNotification>,
++    tx_sub: Sender<Submission>,
++) {
++    tokio::spawn(async move {
++        while let Ok(notification) = rx.recv().await {
++            let sub = channel_notification_submission(notification);
++            if tx_sub.send(sub).await.is_err() {
++                debug!("stopping MCP channel notification loop because submission queue closed");
++                break;
++            }
++        }
++    });
++}
++
++fn channel_notification_submission(notification: McpChannelNotification) -> Submission {
++    let input = McpChannelEvent::from(notification).into_user_input();
++    Submission {
++        id: Uuid::now_v7().to_string(),
++        op: Op::UserInput {
++            items: vec![input],
++            final_output_json_schema: None,
++            responsesapi_client_metadata: None,
++            additional_context: BTreeMap::new(),
++            thread_settings: ThreadSettingsOverrides::default(),
++        },
++        client_user_message_id: None,
++        trace: None,
++    }
++}
++#[cfg(test)]
++#[path = "mcp_channels_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/session/mcp_channels_tests.rs b/codex-rs/core/src/session/mcp_channels_tests.rs
+new file mode 100644
+index 000000000..3d1a84ae7
+--- /dev/null
++++ b/codex-rs/core/src/session/mcp_channels_tests.rs
+@@ -0,0 +1,33 @@
++use std::collections::BTreeMap;
++
++use codex_mcp::McpChannelNotification;
++use codex_protocol::protocol::Op;
++use codex_protocol::user_input::UserInput;
++use pretty_assertions::assert_eq;
++
++use super::channel_notification_submission;
++
++#[test]
++fn channel_notification_becomes_user_input_submission() {
++    let sub = channel_notification_submission(McpChannelNotification {
++        source: "talk".to_string(),
++        content: "hello".to_string(),
++        meta: BTreeMap::from([
++            ("arrived_on_channel".to_string(), "desk".to_string()),
++            ("reply_to_channel".to_string(), "user".to_string()),
++            ("source".to_string(), "not-the-server-name".to_string()),
++        ]),
++    });
++
++    let Op::UserInput { items, .. } = sub.op else {
++        panic!("expected user input op");
++    };
++
++    assert_eq!(
++        items,
++        vec![UserInput::Text {
++            text: "<channel source=\"talk\" arrived_on_channel=\"desk\" reply_to_channel=\"user\">hello</channel>".to_string(),
++            text_elements: Vec::new(),
++        }]
++    );
++}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 8467a78e5..1460f0d6f 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -214,6 +214,7 @@ mod handlers;
+ mod inject;
+ mod input_queue;
+ mod mcp;
++mod mcp_channels;
+ pub(crate) mod multi_agents;
+ mod review;
+ mod rollout_budget;
+@@ -541,6 +542,7 @@ impl Codex {
+         } = args;
+         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
+         let (tx_event, rx_event) = async_channel::unbounded();
++        let (mcp_channel_tx, mcp_channel_rx) = async_channel::unbounded();
+ 
+         let LoadedUserInstructions {
+             instructions: user_instructions,
+@@ -668,6 +670,7 @@ impl Codex {
+             models_manager.clone(),
+             exec_policy,
+             tx_event.clone(),
++            mcp_channel_tx,
+             agent_status_tx.clone(),
+             conversation_history,
+             session_source_clone,
+@@ -693,6 +696,7 @@ impl Codex {
+             map_session_init_error(&e, &config.codex_home)
+         })?;
+         let thread_id = session.thread_id;
++        self::mcp_channels::spawn_mcp_channel_notification_loop(mcp_channel_rx, tx_sub.clone());
+ 
+         // This task will run until Op::Shutdown is received.
+         let session_for_loop = Arc::clone(&session);
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index eda6fcbc8..931d1a1ac 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -478,6 +478,7 @@ impl Session {
+         models_manager: SharedModelsManager,
+         exec_policy: Arc<ExecPolicyManager>,
+         tx_event: Sender<Event>,
++        mcp_channel_tx: async_channel::Sender<codex_mcp::McpChannelNotification>,
+         agent_status: watch::Sender<AgentStatus>,
+         initial_history: InitialHistory,
+         session_source: SessionSource,
+@@ -1009,6 +1010,7 @@ impl Session {
+                 // setup is straightforward enough and performs well.
+                 mcp_connection_manager,
+                 mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
++                mcp_channel_tx: mcp_channel_tx.clone(),
+                 unified_exec_manager: UnifiedExecProcessManager::new(
+                     config.background_terminal_max_timeout,
+                 ),
+@@ -1163,6 +1165,7 @@ impl Session {
+                     sess.services.turn_environments.environment_manager(),
+                     cwd,
+                 )
++                .with_thread_id(thread_id.to_string())
+             };
+             let mcp_connection_manager = McpConnectionManager::new(
+                 &mcp_servers,
+@@ -1186,6 +1189,7 @@ impl Session {
+                 tool_plugin_provenance,
+                 auth,
+                 Some(sess.mcp_elicitation_reviewer()),
++                Some(mcp_channel_tx),
+             )
+             .instrument(info_span!(
+                 "session_init.mcp_manager_init",
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index e859b1c84..3eccaf36f 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -4984,6 +4984,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
+         models_manager,
+         Arc::new(ExecPolicyManager::default()),
+         tx_event,
++        /*mcp_channel_tx*/ async_channel::unbounded().0,
+         agent_status_tx,
+         InitialHistory::New,
+         SessionSource::Exec,
+@@ -5123,6 +5124,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+             ),
+         )),
+         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
++        mcp_channel_tx: async_channel::unbounded().0,
+         unified_exec_manager: UnifiedExecProcessManager::new(
+             config.background_terminal_max_timeout,
+         ),
+@@ -5342,6 +5344,7 @@ async fn make_session_with_config_and_rx(
+         models_manager,
+         Arc::new(ExecPolicyManager::default()),
+         tx_event,
++        /*mcp_channel_tx*/ async_channel::unbounded().0,
+         agent_status_tx,
+         InitialHistory::New,
+         SessionSource::Exec,
+@@ -5448,6 +5451,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
+         models_manager,
+         Arc::new(ExecPolicyManager::default()),
+         tx_event,
++        /*mcp_channel_tx*/ async_channel::unbounded().0,
+         agent_status_tx,
+         initial_history,
+         session_source,
+@@ -7188,6 +7192,7 @@ where
+             ),
+         )),
+         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
++        mcp_channel_tx: async_channel::unbounded().0,
+         unified_exec_manager: UnifiedExecProcessManager::new(
+             config.background_terminal_max_timeout,
+         ),
+diff --git a/codex-rs/core/src/state/service.rs b/codex-rs/core/src/state/service.rs
+index 853b96e92..09bc58816 100644
+--- a/codex-rs/core/src/state/service.rs
++++ b/codex-rs/core/src/state/service.rs
+@@ -29,6 +29,7 @@ use codex_extension_api::ExtensionDataInit;
+ use codex_extension_api::ExtensionRegistry;
+ use codex_hooks::Hooks;
+ use codex_login::AuthManager;
++use codex_mcp::McpChannelNotification;
+ use codex_mcp::McpConnectionManager;
+ use codex_models_manager::manager::SharedModelsManager;
+ use codex_otel::SessionTelemetry;
+@@ -45,6 +46,7 @@ pub(crate) struct SessionServices {
+     /// The latest manager; callers retain an owned handle while performing MCP I/O.
+     pub(crate) mcp_connection_manager: Arc<ArcSwap<McpConnectionManager>>,
+     pub(crate) mcp_startup_cancellation_token: Mutex<CancellationToken>,
++    pub(crate) mcp_channel_tx: async_channel::Sender<McpChannelNotification>,
+     pub(crate) unified_exec_manager: UnifiedExecProcessManager,
+     #[cfg_attr(not(unix), allow(dead_code))]
+     pub(crate) shell_zsh_path: Option<PathBuf>,
+diff --git a/codex-rs/rmcp-client/src/elicitation_client_service.rs b/codex-rs/rmcp-client/src/elicitation_client_service.rs
+index 2227ee4d6..8c59fa3ec 100644
+--- a/codex-rs/rmcp-client/src/elicitation_client_service.rs
++++ b/codex-rs/rmcp-client/src/elicitation_client_service.rs
+@@ -3,6 +3,7 @@ use std::sync::Arc;
+ use rmcp::RoleClient;
+ use rmcp::model::ClientInfo;
+ use rmcp::model::ClientResult;
++use rmcp::model::CustomNotification;
+ use rmcp::model::CustomRequest;
+ use rmcp::model::CustomResult;
+ use rmcp::model::ElicitationAction;
+@@ -22,6 +23,7 @@ use crate::logging_client_handler::LoggingClientHandler;
+ use crate::rmcp_client::Elicitation;
+ use crate::rmcp_client::ElicitationPauseState;
+ use crate::rmcp_client::ElicitationResponse;
++use crate::rmcp_client::SendCustomNotification;
+ use crate::rmcp_client::SendElicitation;
+ 
+ const MCP_PROGRESS_TOKEN_META_KEY: &str = "progressToken";
+@@ -41,6 +43,7 @@ pub(crate) struct ElicitationClientService {
+     handler: LoggingClientHandler,
+     supports_openai_form: bool,
+     send_elicitation: Arc<SendElicitation>,
++    send_custom_notification: Option<Arc<SendCustomNotification>>,
+     pause_state: ElicitationPauseState,
+ }
+ 
+@@ -48,6 +51,7 @@ impl ElicitationClientService {
+     pub(crate) fn new(
+         client_info: ClientInfo,
+         send_elicitation: SendElicitation,
++        send_custom_notification: Option<SendCustomNotification>,
+         pause_state: ElicitationPauseState,
+     ) -> Self {
+         let supports_openai_form = client_info
+@@ -56,6 +60,7 @@ impl ElicitationClientService {
+             .as_ref()
+             .is_some_and(|extensions| extensions.contains_key(OPENAI_FORM_METHOD));
+         let send_elicitation = Arc::new(send_elicitation);
++        let send_custom_notification = send_custom_notification.map(Arc::new);
+         Self {
+             handler: LoggingClientHandler::new(
+                 client_info,
+@@ -63,6 +68,7 @@ impl ElicitationClientService {
+             ),
+             supports_openai_form,
+             send_elicitation,
++            send_custom_notification,
+             pause_state,
+         }
+     }
+@@ -79,6 +85,15 @@ impl ElicitationClientService {
+             .await
+             .map_err(|err| rmcp::ErrorData::internal_error(err.to_string(), None))
+     }
++
++    async fn handle_custom_notification(&self, notification: CustomNotification) {
++        let Some(send_custom_notification) = self.send_custom_notification.as_ref() else {
++            return;
++        };
++        if let Err(err) = send_custom_notification(notification).await {
++            tracing::warn!("failed to handle MCP custom notification: {err:#}");
++        }
++    }
+ }
+ 
+ fn clone_send_elicitation(send_elicitation: Arc<SendElicitation>) -> SendElicitation {
+@@ -126,6 +141,9 @@ impl Service<RoleClient> for ElicitationClientService {
+         notification: ServerNotification,
+         context: NotificationContext<RoleClient>,
+     ) -> Result<(), rmcp::ErrorData> {
++        if let ServerNotification::CustomNotification(notification) = &notification {
++            self.handle_custom_notification(notification.clone()).await;
++        }
+         <LoggingClientHandler as Service<RoleClient>>::handle_notification(
+             &self.handler,
+             notification,
+diff --git a/codex-rs/rmcp-client/src/lib.rs b/codex-rs/rmcp-client/src/lib.rs
+index e1ee18c75..6fe6acb11 100644
+--- a/codex-rs/rmcp-client/src/lib.rs
++++ b/codex-rs/rmcp-client/src/lib.rs
+@@ -32,6 +32,7 @@ pub use rmcp_client::Elicitation;
+ pub use rmcp_client::ElicitationResponse;
+ pub use rmcp_client::ListToolsWithConnectorIdResult;
+ pub use rmcp_client::RmcpClient;
++pub use rmcp_client::SendCustomNotification;
+ pub use rmcp_client::SendElicitation;
+ pub use rmcp_client::ToolWithConnectorId;
+ pub use stdio_server_launcher::ExecutorStdioServerLauncher;
+diff --git a/codex-rs/rmcp-client/src/rmcp_client.rs b/codex-rs/rmcp-client/src/rmcp_client.rs
+index f5c7da529..b90dafc2b 100644
+--- a/codex-rs/rmcp-client/src/rmcp_client.rs
++++ b/codex-rs/rmcp-client/src/rmcp_client.rs
+@@ -304,6 +304,10 @@ pub type SendElicitation = Box<
+     dyn Fn(RequestId, Elicitation) -> BoxFuture<'static, Result<ElicitationResponse>> + Send + Sync,
+ >;
+ 
++/// Interface for forwarding custom server notifications to higher-level clients.
++pub type SendCustomNotification =
++    Box<dyn Fn(CustomNotification) -> BoxFuture<'static, Result<()>> + Send + Sync>;
++
+ pub struct ToolWithConnectorId {
+     pub tool: Tool,
+     pub connector_id: Option<String>,
+@@ -425,10 +429,38 @@ impl RmcpClient {
+         params: InitializeRequestParams,
+         timeout: Option<Duration>,
+         send_elicitation: SendElicitation,
++    ) -> Result<InitializeResult> {
++        self.initialize_inner(params, timeout, send_elicitation, None)
++            .await
++    }
++
++    pub async fn initialize_with_custom_notification_handler(
++        &self,
++        params: InitializeRequestParams,
++        timeout: Option<Duration>,
++        send_elicitation: SendElicitation,
++        send_custom_notification: SendCustomNotification,
++    ) -> Result<InitializeResult> {
++        self.initialize_inner(
++            params,
++            timeout,
++            send_elicitation,
++            Some(send_custom_notification),
++        )
++        .await
++    }
++
++    async fn initialize_inner(
++        &self,
++        params: InitializeRequestParams,
++        timeout: Option<Duration>,
++        send_elicitation: SendElicitation,
++        send_custom_notification: Option<SendCustomNotification>,
+     ) -> Result<InitializeResult> {
+         let client_service = ElicitationClientService::new(
+             params.clone(),
+             send_elicitation,
++            send_custom_notification,
+             self.elicitation_pause_state.clone(),
+         );
+         let pending_transport = {
