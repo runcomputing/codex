@@ -478,6 +478,7 @@ impl Session {
         models_manager: SharedModelsManager,
         exec_policy: Arc<ExecPolicyManager>,
         tx_event: Sender<Event>,
+        mcp_channel_tx: async_channel::Sender<codex_mcp::McpChannelNotification>,
         agent_status: watch::Sender<AgentStatus>,
         initial_history: InitialHistory,
         session_source: SessionSource,
@@ -1009,6 +1010,7 @@ impl Session {
                 // setup is straightforward enough and performs well.
                 mcp_connection_manager,
                 mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
+                mcp_channel_tx: mcp_channel_tx.clone(),
                 unified_exec_manager: UnifiedExecProcessManager::new(
                     config.background_terminal_max_timeout,
                 ),
@@ -1163,6 +1165,7 @@ impl Session {
                     sess.services.turn_environments.environment_manager(),
                     cwd,
                 )
+                .with_thread_id(thread_id.to_string())
             };
             let mcp_connection_manager = McpConnectionManager::new(
                 &mcp_servers,
@@ -1186,6 +1189,7 @@ impl Session {
                 tool_plugin_provenance,
                 auth,
                 Some(sess.mcp_elicitation_reviewer()),
+                Some(mcp_channel_tx),
             )
             .instrument(info_span!(
                 "session_init.mcp_manager_init",

@@ -338,7 +338,8 @@ impl Session {
                 #[allow(deprecated)]
                 turn_context.cwd.to_path_buf()
             });
-        let mcp_runtime_context = McpRuntimeContext::new(environment_manager, cwd);
+        let mcp_runtime_context = McpRuntimeContext::new(environment_manager, cwd)
+            .with_thread_id(self.thread_id.to_string());
         let mcp_startup_cancellation_token = {
             let mut guard = self.services.mcp_startup_cancellation_token.lock().await;
             guard.cancel();
@@ -368,6 +369,7 @@ impl Session {
             tool_plugin_provenance,
             auth.as_ref(),
             elicitation_reviewer,
+            Some(self.services.mcp_channel_tx.clone()),
         )
         .await;
         {
