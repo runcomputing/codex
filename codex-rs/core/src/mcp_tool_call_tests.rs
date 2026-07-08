@@ -1441,6 +1441,7 @@ async fn host_owned_codex_apps_manager(
         /*elicitation_reviewer*/ None,
         /*elicitation_lifecycle*/ None,
         codex_mcp::ElicitationRequestRouter::default(),
+        /*channel_notification_tx*/ None,
     )
     .await;
     Arc::new(manager)

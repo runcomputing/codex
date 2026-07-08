@@ -1564,6 +1564,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
         /*elicitation_reviewer*/ None,
         /*elicitation_lifecycle*/ None,
         ElicitationRequestRouter::default(),
+        /*channel_notification_tx*/ None,
     )
     .await;
 

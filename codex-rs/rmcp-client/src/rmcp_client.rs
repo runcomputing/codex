@@ -304,6 +304,10 @@ pub type SendElicitation = Box<
     dyn Fn(RequestId, Elicitation) -> BoxFuture<'static, Result<ElicitationResponse>> + Send + Sync,
 >;
 
+/// Interface for forwarding custom server notifications to higher-level clients.
+pub type SendCustomNotification =
+    Box<dyn Fn(CustomNotification) -> BoxFuture<'static, Result<()>> + Send + Sync>;
+
 pub struct ToolWithConnectorId {
     pub tool: Tool,
     pub connector_id: Option<String>,
@@ -427,9 +431,37 @@ impl RmcpClient {
         timeout: Option<Duration>,
         send_elicitation: SendElicitation,
     ) -> Result<InitializeResult> {
+        self.initialize_inner(params, timeout, send_elicitation, None)
+            .await
+    }
+
+    pub async fn initialize_with_custom_notification_handler(
+        &self,
+        params: InitializeRequestParams,
+        timeout: Option<Duration>,
+        send_elicitation: SendElicitation,
+        send_custom_notification: SendCustomNotification,
+    ) -> Result<InitializeResult> {
+        self.initialize_inner(
+            params,
+            timeout,
+            send_elicitation,
+            Some(send_custom_notification),
+        )
+        .await
+    }
+
+    async fn initialize_inner(
+        &self,
+        params: InitializeRequestParams,
+        timeout: Option<Duration>,
+        send_elicitation: SendElicitation,
+        send_custom_notification: Option<SendCustomNotification>,
+    ) -> Result<InitializeResult> {
         let client_service = ElicitationClientService::new(
             params.clone(),
             send_elicitation,
+            send_custom_notification,
             self.elicitation_pause_state.clone(),
         );
         let pending_transport = {
