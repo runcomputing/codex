@@ -32,6 +32,7 @@ use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ExtensionRegistry;
 use codex_hooks::Hooks;
 use codex_login::AuthManager;
+use codex_mcp::McpChannelNotification;
 use codex_mcp::McpConfig;
 use codex_mcp::McpConnectionManager;
 use codex_mcp::McpRuntimeContext;
@@ -55,6 +56,7 @@ pub(crate) struct SessionServices {
     /// Serializes environment-driven runtime rebuilds.
     pub(crate) mcp_projection_lock: Mutex<()>,
     pub(crate) mcp_startup_cancellation_token: Mutex<CancellationToken>,
+    pub(crate) mcp_channel_tx: async_channel::Sender<McpChannelNotification>,
     pub(crate) unified_exec_manager: UnifiedExecProcessManager,
     pub(crate) elicitations: ElicitationService,
     #[cfg_attr(not(unix), allow(dead_code))]

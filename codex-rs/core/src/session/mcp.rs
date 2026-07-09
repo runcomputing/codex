@@ -343,7 +343,8 @@ impl Session {
                 #[allow(deprecated)]
                 turn_context.cwd.to_path_buf()
             });
-        let mcp_runtime_context = McpRuntimeContext::new(environment_manager, cwd);
+        let mcp_runtime_context = McpRuntimeContext::new(environment_manager, cwd)
+            .with_thread_id(self.thread_id.to_string());
         let auth_statuses = compute_auth_statuses(
             mcp_servers.iter(),
             mcp_config.mcp_oauth_credentials_store_mode,
@@ -389,6 +390,7 @@ impl Session {
             elicitation_reviewer,
             Some(self.mcp_elicitation_lifecycle()),
             current_runtime.manager().elicitation_router(),
+            Some(self.services.mcp_channel_tx.clone()),
         )
         .await;
         refreshed_manager
