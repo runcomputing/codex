@@ -1,13 +1,15 @@
 # Releasing the patched codex CLI — agent runbook
 
 **Self-contained runbook.** Goal: build and publish the patched `codex` CLI (upstream
-codex + MCP channel support) for a new **stable** upstream release. Every platform
+codex + local extras customizations) for a new **stable** upstream release. Every platform
 ships **two** binaries — `codex` and its companion `codex-code-mode-host` — from the
 same build. You can run this from anywhere — if you're not already in a
 `runcomputing/codex` checkout, **start at step 0**; it gets you there.
 
-The change is a single patch file applied onto an upstream **release tag** at build
-time — we never maintain a patched branch, and never patch `main`.
+The customizations live in a single patch file applied onto an upstream **release tag** at
+build time — we never maintain a patched branch, and never patch `main`. It currently
+carries MCP channel support, the custom status-line command, and related configuration
+validation.
 
 ---
 
@@ -169,9 +171,12 @@ git commit -m "refresh codex-channel.patch for <tag>" && git push
 | | |
 | --- | --- |
 | `main` (default) | upstream `main` **+** our `extras/` overlay as a single commit on top; the `mirror-upstream` workflow rebases that commit onto upstream's latest each day and copies new `rust-v*` tags. **No codex-rs edits.** |
-| `extras/codex-channel.patch` | the only code change (MCP channel support) |
+| `extras/codex-channel.patch` | the only code change |
 | `extras/release.sh` / `release-linux.sh` | build + publish both binaries, per platform |
 | `extras/README.md` | Codex-desktop wiring (`CODEX_CLI_PATH`, the LaunchAgent plist) |
+
+The patch currently carries MCP channel support, the custom status-line command, and
+related configuration validation.
 
 devx's `install.py` is a pure consumer: it downloads `codex` **and**
 `codex-code-mode-host` from the same (newest complete, non-prerelease) `*-patched`
