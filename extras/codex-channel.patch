@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/tests/suite/v2/mcp_tool.rs b/codex-rs/app-server/tests/suite/v2/mcp_tool.rs
-index ff8d0fcac..3865ba4eb 100644
+index 453b4c0abf..3a5cbf1366 100644
 --- a/codex-rs/app-server/tests/suite/v2/mcp_tool.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mcp_tool.rs
 @@ -81,6 +81,8 @@ const URL_ELICITATION_TRIGGER_MESSAGE: &str = "auth";
@@ -11,7 +11,7 @@ index ff8d0fcac..3865ba4eb 100644
  
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn mcp_server_tool_call_returns_tool_result() -> Result<()> {
-@@ -707,6 +709,110 @@ url = "{mcp_server_url}/mcp"
+@@ -708,6 +710,113 @@ url = "{mcp_server_url}/mcp"
      Ok(())
  }
  
@@ -71,7 +71,10 @@ index ff8d0fcac..3865ba4eb 100644
 +    ));
 +    std::fs::write(config_path, config_toml)?;
 +
-+    let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
++    let mut mcp = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .build()
++        .await?;
 +    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 +
 +    let thread_start_id = mcp
@@ -124,7 +127,7 @@ index ff8d0fcac..3865ba4eb 100644
  
 diff --git a/codex-rs/codex-mcp/src/channel.rs b/codex-rs/codex-mcp/src/channel.rs
 new file mode 100644
-index 000000000..f6e613df5
+index 0000000000..f6e613df5c
 --- /dev/null
 +++ b/codex-rs/codex-mcp/src/channel.rs
 @@ -0,0 +1,87 @@
@@ -217,7 +220,7 @@ index 000000000..f6e613df5
 +mod tests;
 diff --git a/codex-rs/codex-mcp/src/channel_tests.rs b/codex-rs/codex-mcp/src/channel_tests.rs
 new file mode 100644
-index 000000000..febd7a88b
+index 0000000000..febd7a88bb
 --- /dev/null
 +++ b/codex-rs/codex-mcp/src/channel_tests.rs
 @@ -0,0 +1,55 @@
@@ -277,18 +280,18 @@ index 000000000..febd7a88b
 +    );
 +}
 diff --git a/codex-rs/codex-mcp/src/connection_manager.rs b/codex-rs/codex-mcp/src/connection_manager.rs
-index 612b2ed44..1d055ef5f 100644
+index eaf0719dfd..b8faa39e7b 100644
 --- a/codex-rs/codex-mcp/src/connection_manager.rs
 +++ b/codex-rs/codex-mcp/src/connection_manager.rs
-@@ -14,6 +14,7 @@ use std::time::Duration;
+@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering;
+ use std::time::Duration;
  use std::time::Instant;
  
- use crate::McpAuthStatusEntry;
 +use crate::channel::McpChannelNotification;
- use crate::codex_apps_cache::CodexAppsToolsCache;
- use crate::codex_apps_cache::CodexAppsToolsCacheKey;
- use crate::codex_apps_cache::CodexAppsToolsFetchSource;
-@@ -146,6 +147,7 @@ impl McpConnectionManager {
+ use crate::codex_apps::prepare_openai_file_params_for_model;
+ use crate::elicitation::ElicitationRequestManager;
+ use crate::elicitation::ElicitationRequestRouter;
+@@ -148,6 +149,7 @@ impl McpConnectionManager {
          elicitation_reviewer: Option<ElicitationReviewerHandle>,
          elicitation_lifecycle: Option<crate::ElicitationLifecycle>,
          elicitation_router: ElicitationRequestRouter,
@@ -296,7 +299,7 @@ index 612b2ed44..1d055ef5f 100644
      ) -> Self {
          let mut required_servers = mcp_servers
              .iter()
-@@ -241,6 +243,7 @@ impl McpConnectionManager {
+@@ -268,6 +270,7 @@ impl McpConnectionManager {
                  runtime_auth_provider,
                  client_elicitation_capability.clone(),
                  supports_openai_form_elicitation,
@@ -305,10 +308,10 @@ index 612b2ed44..1d055ef5f 100644
              clients.insert(server_name.clone(), async_managed_client.clone());
              let tx_event = tx_event.clone();
 diff --git a/codex-rs/codex-mcp/src/connection_manager_tests.rs b/codex-rs/codex-mcp/src/connection_manager_tests.rs
-index d8a1f1863..7f853190b 100644
+index 12d50d4130..025d8f3552 100644
 --- a/codex-rs/codex-mcp/src/connection_manager_tests.rs
 +++ b/codex-rs/codex-mcp/src/connection_manager_tests.rs
-@@ -1565,6 +1565,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
+@@ -1596,6 +1596,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
          /*elicitation_reviewer*/ None,
          /*elicitation_lifecycle*/ None,
          ElicitationRequestRouter::default(),
@@ -317,7 +320,7 @@ index d8a1f1863..7f853190b 100644
      .await;
  
 diff --git a/codex-rs/codex-mcp/src/lib.rs b/codex-rs/codex-mcp/src/lib.rs
-index 77128d797..9e56688da 100644
+index fa1d19023b..6e823fb059 100644
 --- a/codex-rs/codex-mcp/src/lib.rs
 +++ b/codex-rs/codex-mcp/src/lib.rs
 @@ -1,3 +1,6 @@
@@ -327,19 +330,19 @@ index 77128d797..9e56688da 100644
  pub use connection_manager::McpConnectionManager;
  pub use connection_manager::tool_is_model_visible;
  pub use elicitation::ElicitationLifecycle;
-@@ -77,6 +80,7 @@ pub use tools::declared_openai_file_input_param_names;
+@@ -82,6 +85,7 @@ pub use mcp::qualified_mcp_tool_name_prefix;
  
  pub(crate) mod auth_elicitation;
  mod catalog;
 +pub(crate) mod channel;
  pub(crate) mod codex_apps;
- pub(crate) mod codex_apps_cache;
  pub(crate) mod connection_manager;
+ pub(crate) mod elicitation;
 diff --git a/codex-rs/codex-mcp/src/mcp/mod.rs b/codex-rs/codex-mcp/src/mcp/mod.rs
-index 847dbe286..5a2897181 100644
+index ad42c5425c..19698d7300 100644
 --- a/codex-rs/codex-mcp/src/mcp/mod.rs
 +++ b/codex-rs/codex-mcp/src/mcp/mod.rs
-@@ -342,6 +342,7 @@ pub async fn read_mcp_resource(
+@@ -337,6 +337,7 @@ pub async fn read_mcp_resource(
          /*elicitation_reviewer*/ None,
          /*elicitation_lifecycle*/ None,
          crate::elicitation::ElicitationRequestRouter::default(),
@@ -347,7 +350,7 @@ index 847dbe286..5a2897181 100644
      )
      .await;
  
-@@ -421,6 +422,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
+@@ -417,6 +418,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
          /*elicitation_reviewer*/ None,
          /*elicitation_lifecycle*/ None,
          crate::elicitation::ElicitationRequestRouter::default(),
@@ -356,7 +359,7 @@ index 847dbe286..5a2897181 100644
      .await;
  
 diff --git a/codex-rs/codex-mcp/src/rmcp_client.rs b/codex-rs/codex-mcp/src/rmcp_client.rs
-index 6fe820b4f..90d8a4190 100644
+index 4ac96f867f..8a965b8e63 100644
 --- a/codex-rs/codex-mcp/src/rmcp_client.rs
 +++ b/codex-rs/codex-mcp/src/rmcp_client.rs
 @@ -18,6 +18,8 @@ use std::sync::atomic::Ordering;
@@ -368,7 +371,7 @@ index 6fe820b4f..90d8a4190 100644
  use crate::codex_apps::normalize_codex_apps_callable_name;
  use crate::codex_apps::normalize_codex_apps_callable_namespace;
  use crate::codex_apps::normalize_codex_apps_tool_title;
-@@ -52,9 +54,11 @@ use codex_protocol::protocol::Event;
+@@ -54,9 +56,11 @@ use codex_protocol::protocol::Event;
  use codex_protocol::protocol::EventMsg;
  use codex_protocol::protocol::McpStartupStatus;
  use codex_protocol::protocol::McpStartupUpdateEvent;
@@ -380,7 +383,7 @@ index 6fe820b4f..90d8a4190 100644
  use codex_rmcp_client::StdioServerLauncher;
  use codex_rmcp_client::ToolWithConnectorId;
  use codex_rmcp_client::is_authentication_required_error;
-@@ -277,6 +281,7 @@ struct ManagedClientStartup {
+@@ -281,6 +285,7 @@ struct ManagedClientStartup {
      runtime_auth_provider: Option<SharedAuthProvider>,
      client_elicitation_capability: ElicitationCapability,
      supports_openai_form_elicitation: bool,
@@ -388,7 +391,7 @@ index 6fe820b4f..90d8a4190 100644
      cancel_token: CancellationToken,
      startup_complete: Arc<AtomicBool>,
  }
-@@ -295,6 +300,7 @@ impl ManagedClientStartup {
+@@ -301,6 +306,7 @@ impl ManagedClientStartup {
              runtime_auth_provider,
              client_elicitation_capability,
              supports_openai_form_elicitation,
@@ -396,18 +399,18 @@ index 6fe820b4f..90d8a4190 100644
              cancel_token,
              startup_complete,
          } = self.clone();
-@@ -303,6 +309,9 @@ impl ManagedClientStartup {
+@@ -313,6 +319,9 @@ impl ManagedClientStartup {
              .configured_config()
-             .map(ToolFilter::from_config)
-             .unwrap_or_default();
+             .and_then(|config| config.startup_timeout_sec)
+             .unwrap_or(DEFAULT_STARTUP_TIMEOUT);
 +        let server_uses_stdio = server.configured_config().is_some_and(|config| {
 +            matches!(&config.transport, McpServerTransportConfig::Stdio { .. })
 +        });
          let cancel_token_for_fut = cancel_token;
-         async move {
-             let refresh_start = is_codex_apps_mcp_server.then(Instant::now);
-@@ -341,6 +350,8 @@ impl ManagedClientStartup {
-                         codex_apps_tools_cache_context,
+         let tool_catalog_fetch_ticket = tool_catalog_cache_context
+             .as_ref()
+@@ -363,6 +372,8 @@ impl ManagedClientStartup {
+                         tool_catalog_fetch_ticket,
                          client_elicitation_capability,
                          supports_openai_form_elicitation,
 +                        channel_notification_tx,
@@ -415,7 +418,7 @@ index 6fe820b4f..90d8a4190 100644
                      },
                  )
                  .await
-@@ -403,6 +414,7 @@ impl AsyncManagedClient {
+@@ -428,6 +439,7 @@ impl AsyncManagedClient {
          runtime_auth_provider: Option<SharedAuthProvider>,
          client_elicitation_capability: ElicitationCapability,
          supports_openai_form_elicitation: bool,
@@ -423,7 +426,7 @@ index 6fe820b4f..90d8a4190 100644
      ) -> Self {
          let is_codex_apps_mcp_server = server_name == CODEX_APPS_MCP_SERVER_NAME;
          let reconnect_server_name = server_name.clone();
-@@ -431,6 +443,7 @@ impl AsyncManagedClient {
+@@ -458,6 +470,7 @@ impl AsyncManagedClient {
              runtime_auth_provider,
              client_elicitation_capability,
              supports_openai_form_elicitation,
@@ -431,8 +434,8 @@ index 6fe820b4f..90d8a4190 100644
              cancel_token: cancel_token.clone(),
              startup_complete: Arc::clone(&startup_complete),
          });
-@@ -826,6 +839,8 @@ async fn start_server_task(
-         codex_apps_tools_cache_context,
+@@ -875,17 +888,50 @@ async fn start_server_task(
+         tool_catalog_fetch_ticket,
          client_elicitation_capability,
          supports_openai_form_elicitation,
 +        channel_notification_tx,
@@ -440,9 +443,8 @@ index 6fe820b4f..90d8a4190 100644
      } = params;
      let params = mcp_initialize_request_params(
          client_elicitation_capability,
-@@ -833,11 +848,42 @@ async fn start_server_task(
+         supports_openai_form_elicitation,
      );
- 
      let send_elicitation = elicitation_requests.make_sender(server_name.clone(), tx_event);
 +    let channel_notifications_enabled = Arc::new(AtomicBool::new(false));
 +    let send_custom_notification = channel_notification_tx.map(|tx| {
@@ -487,8 +489,8 @@ index 6fe820b4f..90d8a4190 100644
  
      let server_supports_sandbox_state_meta_capability = initialize_result
          .capabilities
-@@ -935,6 +981,44 @@ struct StartServerTaskParams {
-     codex_apps_tools_cache_context: Option<CodexAppsToolsCacheContext>,
+@@ -992,6 +1038,44 @@ struct StartServerTaskParams {
+     tool_catalog_fetch_ticket: Option<McpToolCatalogFetchTicket>,
      client_elicitation_capability: ElicitationCapability,
      supports_openai_form_elicitation: bool,
 +    channel_notification_tx: Option<Sender<McpChannelNotification>>,
@@ -532,7 +534,7 @@ index 6fe820b4f..90d8a4190 100644
  }
  
  #[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
-@@ -965,11 +1049,7 @@ async fn make_rmcp_client(
+@@ -1022,11 +1106,7 @@ async fn make_rmcp_client(
          } => {
              let command_os: OsString = command.into();
              let args_os: Vec<OsString> = args.into_iter().map(Into::into).collect();
@@ -545,7 +547,7 @@ index 6fe820b4f..90d8a4190 100644
              let launcher = if is_local_environment {
                  // TODO(starr): Unify local stdio MCP launch with
                  // `ExecutorStdioServerLauncher` once the executor-backed path
-@@ -1025,13 +1105,41 @@ async fn make_rmcp_client(
+@@ -1082,13 +1162,41 @@ async fn make_rmcp_client(
      }
  }
  
@@ -587,7 +589,7 @@ index 6fe820b4f..90d8a4190 100644
  
      #[test]
      fn startup_outcome_error_identifies_authentication_required() {
-@@ -1147,4 +1255,51 @@ mod tests {
+@@ -1205,4 +1313,51 @@ mod tests {
              serde_json::to_value(expected).expect("serialize expected tool info")
          );
      }
@@ -640,7 +642,7 @@ index 6fe820b4f..90d8a4190 100644
 +    }
  }
 diff --git a/codex-rs/codex-mcp/src/runtime.rs b/codex-rs/codex-mcp/src/runtime.rs
-index b9b769ffb..7d3898e8f 100644
+index b9b769ffb4..7d3898e8f2 100644
 --- a/codex-rs/codex-mcp/src/runtime.rs
 +++ b/codex-rs/codex-mcp/src/runtime.rs
 @@ -31,12 +31,14 @@ pub struct SandboxState {
@@ -686,11 +688,253 @@ index b9b769ffb..7d3898e8f 100644
      pub(crate) fn resolve_server_environment(
          &self,
          server_name: &str,
+diff --git a/codex-rs/config/src/loader/mod.rs b/codex-rs/config/src/loader/mod.rs
+index 00110bc08b..0d5fd19e9e 100644
+--- a/codex-rs/config/src/loader/mod.rs
++++ b/codex-rs/config/src/loader/mod.rs
+@@ -950,6 +950,27 @@ fn sanitize_project_config(config: &mut TomlValue) -> Vec<String> {
+     {
+         ignored_keys.push("features.respect_system_proxy".to_string());
+     }
++    let (ignored_status_line_command, ignored_custom_status_line_item) =
++        if let Some(tui) = table.get_mut("tui").and_then(TomlValue::as_table_mut) {
++            let ignored_status_line_command = tui.remove("status_line_command").is_some();
++            let ignored_custom_status_line_item = tui
++                .get_mut("status_line")
++                .and_then(TomlValue::as_array_mut)
++                .is_some_and(|status_line| {
++                    let original_len = status_line.len();
++                    status_line.retain(|item| item.as_str() != Some("custom-command"));
++                    status_line.len() != original_len
++                });
++            (ignored_status_line_command, ignored_custom_status_line_item)
++        } else {
++            (false, false)
++        };
++    if ignored_status_line_command {
++        ignored_keys.push("tui.status_line_command".to_string());
++    }
++    if ignored_custom_status_line_item {
++        ignored_keys.push("tui.status_line".to_string());
++    }
+ 
+     ignored_keys
+ }
+diff --git a/codex-rs/config/src/loader/tests.rs b/codex-rs/config/src/loader/tests.rs
+index 068e29aa6e..d574732cfe 100644
+--- a/codex-rs/config/src/loader/tests.rs
++++ b/codex-rs/config/src/loader/tests.rs
+@@ -254,3 +254,31 @@ model = "gpt-dev"
+     .await
+     .expect("profile-v2 should allow unrelated legacy profiles in base user config");
+ }
++
++#[test]
++fn project_config_ignores_custom_status_line_command() {
++    let mut config: TomlValue = toml::from_str(
++        r#"
++[tui]
++status_line = ["custom-command", "current-dir"]
++status_line_command = ["untrusted-command", "--arg"]
++"#,
++    )
++    .expect("project config should parse");
++
++    assert_eq!(
++        sanitize_project_config(&mut config),
++        vec![
++            "tui.status_line_command".to_string(),
++            "tui.status_line".to_string(),
++        ]
++    );
++    let expected: TomlValue = toml::from_str(
++        r#"
++[tui]
++status_line = ["current-dir"]
++"#,
++    )
++    .expect("sanitized project config should parse");
++    assert_eq!(config, expected);
++}
+diff --git a/codex-rs/config/src/types.rs b/codex-rs/config/src/types.rs
+index a66ff3f3a7..b4bee76f3a 100644
+--- a/codex-rs/config/src/types.rs
++++ b/codex-rs/config/src/types.rs
+@@ -723,6 +723,16 @@ pub struct Tui {
+     #[serde(default)]
+     pub status_line: Option<Vec<String>>,
+ 
++    /// Executable and argument vector for the `custom-command` status-line item.
++    ///
++    /// Codex executes the first value directly and passes the remaining values as arguments;
++    /// it never invokes a shell. The command receives the current directory as its working
++    /// directory, `CODEX_STATUS_LINE_CWD`, and `CODEX_THREAD_ID` when a thread is active.
++    /// This setting is ignored in project-local config because it can run a local command.
++    #[schemars(length(min = 1))]
++    #[serde(default)]
++    pub status_line_command: Option<Vec<String>>,
++
+     /// Color status line items with colors derived from the active syntax theme.
+     /// Defaults to `true`.
+     #[serde(default = "default_true")]
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index 89d6bad9b4..29a0b51fed 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -3279,6 +3279,15 @@
+           },
+           "type": "array"
+         },
++        "status_line_command": {
++          "default": null,
++          "description": "Executable and argument vector for the `custom-command` status-line item.\n\nCodex executes the first value directly and passes the remaining values as arguments; it never invokes a shell. The command receives the current directory as its working directory, `CODEX_STATUS_LINE_CWD`, and `CODEX_THREAD_ID` when a thread is active. This setting is ignored in project-local config because it can run a local command.",
++          "items": {
++            "type": "string"
++          },
++          "minItems": 1,
++          "type": "array"
++        },
+         "status_line_use_colors": {
+           "default": true,
+           "description": "Color status line items with colors derived from the active syntax theme. Defaults to `true`.",
+diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
+index 11ec23fc52..0f776fc423 100644
+--- a/codex-rs/core/src/config/config_tests.rs
++++ b/codex-rs/core/src/config/config_tests.rs
+@@ -717,6 +717,30 @@ async fn load_config_rejects_missing_auto_compact_fallback_buffer() -> std::io::
+     Ok(())
+ }
+ 
++#[tokio::test]
++async fn load_config_rejects_orphaned_auto_compact_fallback_buffer() -> std::io::Result<()> {
++    let codex_home = tempdir()?;
++    let config_toml = toml::from_str(
++        "[features.token_budget]\nenabled = true\nauto_compact_fallback_buffer_tokens = 8000\n",
++    )
++    .expect("TOML should deserialize");
++
++    let error = Config::load_from_base_config_with_overrides(
++        config_toml,
++        ConfigOverrides::default(),
++        codex_home.abs(),
++    )
++    .await
++    .expect_err("fallback buffer without fallback prompt should be rejected");
++    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
++    assert_eq!(
++        error.to_string(),
++        "features.token_budget.auto_compact_fallback_prompt is required when auto_compact_fallback_buffer_tokens is set"
++    );
++
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn load_config_resolves_rollout_budget() -> std::io::Result<()> {
+     let codex_home = tempdir()?;
+@@ -983,6 +1007,7 @@ fn config_toml_deserializes_model_availability_nux() {
+             raw_output_mode: false,
+             alternate_screen: AltScreenMode::default(),
+             status_line: None,
++            status_line_command: None,
+             status_line_use_colors: true,
+             terminal_title: None,
+             theme: None,
+@@ -1032,6 +1057,43 @@ status_line_use_colors = false
+     );
+ }
+ 
++#[test]
++fn config_toml_deserializes_status_line_command() {
++    let toml = r#"
++[tui]
++status_line_command = ["talk", "statusline"]
++"#;
++    let cfg: ConfigToml =
++        toml::from_str(toml).expect("TOML deserialization should succeed for TUI config");
++
++    assert_eq!(
++        cfg.tui
++            .expect("tui config should deserialize")
++            .status_line_command,
++        Some(vec!["talk".to_string(), "statusline".to_string()])
++    );
++}
++
++#[tokio::test]
++async fn runtime_config_resolves_status_line_command() -> std::io::Result<()> {
++    let command = vec!["talk".to_string(), "statusline".to_string()];
++    let config = Config::load_from_base_config_with_overrides(
++        ConfigToml {
++            tui: Some(Tui {
++                status_line_command: Some(command.clone()),
++                ..Default::default()
++            }),
++            ..Default::default()
++        },
++        ConfigOverrides::default(),
++        tempdir()?.abs(),
++    )
++    .await?;
++
++    assert_eq!(config.tui_status_line_command, Some(command));
++    Ok(())
++}
++
+ #[test]
+ fn config_toml_deserializes_terminal_resize_reflow_config() {
+     let toml = r#"
+@@ -3832,6 +3894,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
+             raw_output_mode: false,
+             alternate_screen: AltScreenMode::Auto,
+             status_line: None,
++            status_line_command: None,
+             status_line_use_colors: true,
+             terminal_title: None,
+             theme: None,
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index 54bedaa02b..9b9f4c0d61 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -819,6 +819,9 @@ pub struct Config {
+     /// When unset, the TUI defaults to: `model-with-reasoning` and `current-dir`.
+     pub tui_status_line: Option<Vec<String>>,
+ 
++    /// Executable and argument vector for the `custom-command` TUI status-line item.
++    pub tui_status_line_command: Option<Vec<String>>,
++
+     /// Whether to color status line items with colors from the active syntax theme.
+     pub tui_status_line_use_colors: bool,
+ 
+@@ -2727,6 +2730,12 @@ fn resolve_token_budget_config(
+             "features.token_budget.auto_compact_fallback_buffer_tokens is required when auto_compact_fallback_prompt is set",
+         ));
+     }
++    if auto_compact_fallback_prompt.is_none() && auto_compact_fallback_buffer_tokens.is_some() {
++        return Err(std::io::Error::new(
++            std::io::ErrorKind::InvalidInput,
++            "features.token_budget.auto_compact_fallback_prompt is required when auto_compact_fallback_buffer_tokens is set",
++        ));
++    }
+     if auto_compact_fallback_buffer_tokens.is_some_and(|tokens| tokens <= 0) {
+         return Err(std::io::Error::new(
+             std::io::ErrorKind::InvalidInput,
+@@ -4157,6 +4166,10 @@ impl Config {
+                 .map(|t| t.alternate_screen)
+                 .unwrap_or_default(),
+             tui_status_line: cfg.tui.as_ref().and_then(|t| t.status_line.clone()),
++            tui_status_line_command: cfg
++                .tui
++                .as_ref()
++                .and_then(|t| t.status_line_command.clone()),
+             tui_status_line_use_colors: cfg
+                 .tui
+                 .as_ref()
 diff --git a/codex-rs/core/src/connectors.rs b/codex-rs/core/src/connectors.rs
-index a35b717ca..fffcc0a4d 100644
+index 56b4623775..330e4908ad 100644
 --- a/codex-rs/core/src/connectors.rs
 +++ b/codex-rs/core/src/connectors.rs
-@@ -276,6 +276,7 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
+@@ -267,6 +267,7 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
          /*elicitation_reviewer*/ None,
          /*elicitation_lifecycle*/ None,
          codex_mcp::ElicitationRequestRouter::default(),
@@ -700,7 +944,7 @@ index a35b717ca..fffcc0a4d 100644
  
 diff --git a/codex-rs/core/src/context/mcp_channel_event.rs b/codex-rs/core/src/context/mcp_channel_event.rs
 new file mode 100644
-index 000000000..61efe237d
+index 0000000000..61efe237d1
 --- /dev/null
 +++ b/codex-rs/core/src/context/mcp_channel_event.rs
 @@ -0,0 +1,161 @@
@@ -867,7 +1111,7 @@ index 000000000..61efe237d
 +mod tests;
 diff --git a/codex-rs/core/src/context/mcp_channel_event_tests.rs b/codex-rs/core/src/context/mcp_channel_event_tests.rs
 new file mode 100644
-index 000000000..8a1674980
+index 0000000000..8a16749805
 --- /dev/null
 +++ b/codex-rs/core/src/context/mcp_channel_event_tests.rs
 @@ -0,0 +1,38 @@
@@ -910,7 +1154,7 @@ index 000000000..8a1674980
 +    );
 +}
 diff --git a/codex-rs/core/src/context/mod.rs b/codex-rs/core/src/context/mod.rs
-index 56c463714..3e4518308 100644
+index 8987f90e3c..06a1ac7771 100644
 --- a/codex-rs/core/src/context/mod.rs
 +++ b/codex-rs/core/src/context/mod.rs
 @@ -16,6 +16,7 @@ mod internal_model_context;
@@ -930,10 +1174,10 @@ index 56c463714..3e4518308 100644
  pub(crate) use multi_agent_mode_instructions::MultiAgentModeInstructions;
  pub(crate) use network_rule_saved::NetworkRuleSaved;
 diff --git a/codex-rs/core/src/mcp_tool_call_tests.rs b/codex-rs/core/src/mcp_tool_call_tests.rs
-index 99d935c7a..1b521e37d 100644
+index 0653578dde..0bcee11ed4 100644
 --- a/codex-rs/core/src/mcp_tool_call_tests.rs
 +++ b/codex-rs/core/src/mcp_tool_call_tests.rs
-@@ -1466,6 +1466,7 @@ async fn host_owned_codex_apps_manager(
+@@ -1465,6 +1465,7 @@ async fn host_owned_codex_apps_manager(
          /*elicitation_reviewer*/ None,
          /*elicitation_lifecycle*/ None,
          codex_mcp::ElicitationRequestRouter::default(),
@@ -942,20 +1186,20 @@ index 99d935c7a..1b521e37d 100644
      .await;
      Arc::new(manager)
 diff --git a/codex-rs/core/src/session/mcp.rs b/codex-rs/core/src/session/mcp.rs
-index b6dd64a40..32084e8a9 100644
+index 61f967d955..919101636a 100644
 --- a/codex-rs/core/src/session/mcp.rs
 +++ b/codex-rs/core/src/session/mcp.rs
-@@ -343,7 +343,8 @@ impl Session {
+@@ -348,7 +348,8 @@ impl Session {
                  #[allow(deprecated)]
                  turn_context.cwd.to_path_buf()
              });
 -        let mcp_runtime_context = McpRuntimeContext::new(environment_manager, cwd);
 +        let mcp_runtime_context = McpRuntimeContext::new(environment_manager, cwd)
 +            .with_thread_id(self.thread_id.to_string());
-         let auth_statuses = compute_auth_statuses(
-             mcp_servers.iter(),
-             mcp_config.mcp_oauth_credentials_store_mode,
-@@ -389,6 +390,7 @@ impl Session {
+         let mcp_startup_cancellation_token = {
+             let mut guard = self.services.mcp_startup_cancellation_token.lock().await;
+             // The previous runtime owns the old token and may still be serving an in-flight step.
+@@ -386,6 +387,7 @@ impl Session {
              elicitation_reviewer,
              Some(self.mcp_elicitation_lifecycle()),
              current_runtime.manager().elicitation_router(),
@@ -965,7 +1209,7 @@ index b6dd64a40..32084e8a9 100644
          refreshed_manager
 diff --git a/codex-rs/core/src/session/mcp_channels.rs b/codex-rs/core/src/session/mcp_channels.rs
 new file mode 100644
-index 000000000..5d73d207f
+index 0000000000..5d73d207f6
 --- /dev/null
 +++ b/codex-rs/core/src/session/mcp_channels.rs
 @@ -0,0 +1,46 @@
@@ -1017,7 +1261,7 @@ index 000000000..5d73d207f
 +mod tests;
 diff --git a/codex-rs/core/src/session/mcp_channels_tests.rs b/codex-rs/core/src/session/mcp_channels_tests.rs
 new file mode 100644
-index 000000000..3d1a84ae7
+index 0000000000..3d1a84ae74
 --- /dev/null
 +++ b/codex-rs/core/src/session/mcp_channels_tests.rs
 @@ -0,0 +1,33 @@
@@ -1055,7 +1299,7 @@ index 000000000..3d1a84ae7
 +    );
 +}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 9339413b3..5c51a5ff6 100644
+index 941be63427..7ce75b5a28 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -205,6 +205,7 @@ mod handlers;
@@ -1066,7 +1310,7 @@ index 9339413b3..5c51a5ff6 100644
  mod mcp_runtime;
  pub(crate) mod multi_agents;
  mod review;
-@@ -536,6 +537,7 @@ impl Codex {
+@@ -531,6 +532,7 @@ impl Session {
          } = args;
          let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
          let (tx_event, rx_event) = async_channel::unbounded();
@@ -1074,7 +1318,7 @@ index 9339413b3..5c51a5ff6 100644
  
          let LoadedUserInstructions {
              instructions: user_instructions,
-@@ -688,6 +690,7 @@ impl Codex {
+@@ -682,6 +684,7 @@ impl Session {
              models_manager.clone(),
              exec_policy,
              tx_event.clone(),
@@ -1082,7 +1326,7 @@ index 9339413b3..5c51a5ff6 100644
              agent_status_tx.clone(),
              conversation_history,
              session_source_clone,
-@@ -722,6 +725,7 @@ impl Codex {
+@@ -716,6 +719,7 @@ impl Session {
                  .await;
          }
          let thread_id = session.thread_id;
@@ -1091,10 +1335,10 @@ index 9339413b3..5c51a5ff6 100644
          // This task will run until Op::Shutdown is received.
          let session_for_loop = Arc::clone(&session);
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 32be4813e..1edd070d1 100644
+index 0726e2e3b4..7beabd15b4 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
-@@ -486,6 +486,7 @@ impl Session {
+@@ -482,6 +482,7 @@ impl Session {
          models_manager: SharedModelsManager,
          exec_policy: Arc<ExecPolicyManager>,
          tx_event: Sender<Event>,
@@ -1102,17 +1346,17 @@ index 32be4813e..1edd070d1 100644
          agent_status: watch::Sender<AgentStatus>,
          initial_history: InitialHistory,
          session_source: SessionSource,
-@@ -679,7 +680,8 @@ impl Session {
+@@ -676,7 +677,8 @@ impl Session {
              .map(|cwd| cwd.to_path_buf())
              .unwrap_or_else(|| session_configuration.cwd().to_path_buf());
          let mcp_runtime_context =
 -            McpRuntimeContext::new(Arc::clone(&environment_manager), mcp_runtime_cwd);
 +            McpRuntimeContext::new(Arc::clone(&environment_manager), mcp_runtime_cwd)
 +                .with_thread_id(thread_id.to_string());
-         let mcp_runtime_context_for_auth = mcp_runtime_context.clone();
          let auth_and_mcp_fut = async move {
              let auth = auth_manager_clone.auth().await;
-@@ -1058,6 +1060,7 @@ impl Session {
+             let mcp_projection = mcp_manager_for_mcp
+@@ -1046,6 +1048,7 @@ impl Session {
                  mcp_runtime: arc_swap::ArcSwapOption::empty(),
                  mcp_projection_lock: Mutex::new(()),
                  mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
@@ -1120,7 +1364,7 @@ index 32be4813e..1edd070d1 100644
                  unified_exec_manager: UnifiedExecProcessManager::new(
                      config.background_terminal_max_timeout,
                  ),
-@@ -1234,6 +1237,7 @@ impl Session {
+@@ -1223,6 +1226,7 @@ impl Session {
                  Some(sess.mcp_elicitation_reviewer()),
                  Some(sess.mcp_elicitation_lifecycle()),
                  codex_mcp::ElicitationRequestRouter::default(),
@@ -1129,10 +1373,10 @@ index 32be4813e..1edd070d1 100644
              .instrument(info_span!(
                  "session_init.mcp_manager_init",
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 5c6d3d7bb..9e3b9216c 100644
+index fbea8f551e..bed2a60727 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -5308,6 +5308,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
+@@ -5186,6 +5186,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
          models_manager,
          Arc::new(ExecPolicyManager::default()),
          tx_event,
@@ -1140,7 +1384,7 @@ index 5c6d3d7bb..9e3b9216c 100644
          agent_status_tx,
          InitialHistory::New,
          SessionSource::Exec,
-@@ -5465,6 +5466,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+@@ -5342,6 +5343,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
          mcp_runtime: arc_swap::ArcSwapOption::from(Some(mcp_runtime)),
          mcp_projection_lock: Mutex::new(()),
          mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
@@ -1148,7 +1392,7 @@ index 5c6d3d7bb..9e3b9216c 100644
          unified_exec_manager: UnifiedExecProcessManager::new(
              config.background_terminal_max_timeout,
          ),
-@@ -5695,6 +5697,7 @@ async fn make_session_with_config_and_rx(
+@@ -5571,6 +5573,7 @@ async fn make_session_with_config_and_rx(
          models_manager,
          Arc::new(ExecPolicyManager::default()),
          tx_event,
@@ -1156,7 +1400,7 @@ index 5c6d3d7bb..9e3b9216c 100644
          agent_status_tx,
          InitialHistory::New,
          SessionSource::Exec,
-@@ -5803,6 +5806,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
+@@ -5678,6 +5681,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
          models_manager,
          Arc::new(ExecPolicyManager::default()),
          tx_event,
@@ -1164,7 +1408,7 @@ index 5c6d3d7bb..9e3b9216c 100644
          agent_status_tx,
          initial_history,
          session_source,
-@@ -7596,6 +7600,7 @@ where
+@@ -7458,6 +7462,7 @@ where
          mcp_runtime: arc_swap::ArcSwapOption::from(Some(mcp_runtime)),
          mcp_projection_lock: Mutex::new(()),
          mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
@@ -1173,7 +1417,7 @@ index 5c6d3d7bb..9e3b9216c 100644
              config.background_terminal_max_timeout,
          ),
 diff --git a/codex-rs/core/src/state/service.rs b/codex-rs/core/src/state/service.rs
-index 43f411e31..c58fc8953 100644
+index 43f411e31b..c58fc89537 100644
 --- a/codex-rs/core/src/state/service.rs
 +++ b/codex-rs/core/src/state/service.rs
 @@ -32,6 +32,7 @@ use codex_extension_api::ExtensionDataInit;
@@ -1192,8 +1436,20 @@ index 43f411e31..c58fc8953 100644
      pub(crate) unified_exec_manager: UnifiedExecProcessManager,
      pub(crate) elicitations: ElicitationService,
      #[cfg_attr(not(unix), allow(dead_code))]
+diff --git a/codex-rs/core/tests/suite/mcp_auth_refresh.rs b/codex-rs/core/tests/suite/mcp_auth_refresh.rs
+index a8bd10cfc6..f151f9fc38 100644
+--- a/codex-rs/core/tests/suite/mcp_auth_refresh.rs
++++ b/codex-rs/core/tests/suite/mcp_auth_refresh.rs
+@@ -112,6 +112,7 @@ async fn hosted_plugin_runtime_ps_mcp_tool_calls_use_current_auth_manager_token(
+         /*elicitation_reviewer*/ None,
+         /*elicitation_lifecycle*/ None,
+         ElicitationRequestRouter::default(),
++        /*channel_notification_tx*/ None,
+     )
+     .await;
+     // The model-provider test covers AuthManager reload behavior. Keep this
 diff --git a/codex-rs/rmcp-client/src/elicitation_client_service.rs b/codex-rs/rmcp-client/src/elicitation_client_service.rs
-index 2227ee4d6..8c59fa3ec 100644
+index 2227ee4d63..8c59fa3ece 100644
 --- a/codex-rs/rmcp-client/src/elicitation_client_service.rs
 +++ b/codex-rs/rmcp-client/src/elicitation_client_service.rs
 @@ -3,6 +3,7 @@ use std::sync::Arc;
@@ -1271,7 +1527,7 @@ index 2227ee4d6..8c59fa3ec 100644
              &self.handler,
              notification,
 diff --git a/codex-rs/rmcp-client/src/lib.rs b/codex-rs/rmcp-client/src/lib.rs
-index e57eb3686..3cb25021c 100644
+index 45799ef4a8..7728a259aa 100644
 --- a/codex-rs/rmcp-client/src/lib.rs
 +++ b/codex-rs/rmcp-client/src/lib.rs
 @@ -39,6 +39,7 @@ pub use rmcp_client::Elicitation;
@@ -1283,10 +1539,10 @@ index e57eb3686..3cb25021c 100644
  pub use rmcp_client::ToolWithConnectorId;
  pub use startup_error::is_authentication_required_error;
 diff --git a/codex-rs/rmcp-client/src/rmcp_client.rs b/codex-rs/rmcp-client/src/rmcp_client.rs
-index 499c8db3b..8e7b95251 100644
+index ed81eefba7..e9134b6510 100644
 --- a/codex-rs/rmcp-client/src/rmcp_client.rs
 +++ b/codex-rs/rmcp-client/src/rmcp_client.rs
-@@ -304,6 +304,10 @@ pub type SendElicitation = Box<
+@@ -309,6 +309,10 @@ pub type SendElicitation = Box<
      dyn Fn(RequestId, Elicitation) -> BoxFuture<'static, Result<ElicitationResponse>> + Send + Sync,
  >;
  
@@ -1297,7 +1553,7 @@ index 499c8db3b..8e7b95251 100644
  pub struct ToolWithConnectorId {
      pub tool: Tool,
      pub connector_id: Option<String>,
-@@ -426,10 +430,38 @@ impl RmcpClient {
+@@ -432,10 +436,38 @@ impl RmcpClient {
          params: InitializeRequestParams,
          timeout: Option<Duration>,
          send_elicitation: SendElicitation,
@@ -1336,3 +1592,819 @@ index 499c8db3b..8e7b95251 100644
              self.elicitation_pause_state.clone(),
          );
          let pending_transport = {
+diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
+index fbf3ba9c53..7bbc92bbe1 100644
+--- a/codex-rs/thread-manager-sample/src/main.rs
++++ b/codex-rs/thread-manager-sample/src/main.rs
+@@ -218,6 +218,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
+         model_availability_nux: ModelAvailabilityNuxConfig::default(),
+         tui_alternate_screen: AltScreenMode::Auto,
+         tui_status_line: None,
++        tui_status_line_command: None,
+         tui_status_line_use_colors: true,
+         tui_terminal_title: None,
+         tui_theme: None,
+diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
+index e533ca34ab..64d4e113ad 100644
+--- a/codex-rs/tui/src/app/event_dispatch.rs
++++ b/codex-rs/tui/src/app/event_dispatch.rs
+@@ -2188,6 +2188,15 @@ impl App {
+                 self.chat_widget.set_status_line_git_summary(cwd, summary);
+                 self.refresh_status_line();
+             }
++            AppEvent::StatusLineCommandUpdated { request_id, output } => {
++                if self
++                    .chat_widget
++                    .set_status_line_command_output(request_id, output)
++                {
++                    self.refresh_status_line();
++                    tui.frame_requester().schedule_frame();
++                }
++            }
+             AppEvent::StatusLineWorkspaceHeadlineUpdated { request_id, result } => {
+                 if self
+                     .chat_widget
+diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
+index 9ba10f9592..c12318a472 100644
+--- a/codex-rs/tui/src/app_event.rs
++++ b/codex-rs/tui/src/app_event.rs
+@@ -1005,6 +1005,11 @@ pub(crate) enum AppEvent {
+         cwd: PathBuf,
+         summary: crate::chatwidget::StatusLineGitSummary,
+     },
++    /// Async update from the configured external status-line command.
++    StatusLineCommandUpdated {
++        request_id: u64,
++        output: Option<String>,
++    },
+     /// Async update of the workspace notification headline for status line rendering.
+     StatusLineWorkspaceHeadlineUpdated {
+         request_id: u64,
+diff --git a/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__status_line_setup__tests__setup_view_snapshot_uses_runtime_preview_values.snap b/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__status_line_setup__tests__setup_view_snapshot_uses_runtime_preview_values.snap
+index 132ce3dd23..c0e20763bb 100644
+--- a/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__status_line_setup__tests__setup_view_snapshot_uses_runtime_preview_values.snap
++++ b/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__status_line_setup__tests__setup_view_snapshot_uses_runtime_preview_values.snap
+@@ -13,9 +13,9 @@ expression: "render_lines(&view, 72)"
+   [x] model                 Current model name                          
+   [x] current-dir           Current working directory                   
+   [x] git-branch            Current Git branch (omitted when unavaila…  
++  [x] custom-command        Output from the configured external statu…  
+   [ ] model-with-reasoning  Current model name with reasoning level     
+   [ ] reasoning             Current reasoning level                     
+-  [ ] project-name          Project name (omitted when unavailable)     
+                                                                         
+-  gpt-5-codex · ~/codex-rs · jif/statusline-preview                     
++  gpt-5-codex · ~/codex-rs · jif/statusline-preview · custom:status     
+   Press space to toggle; ←/→ to move; enter to confirm and close; esc to
+diff --git a/codex-rs/tui/src/bottom_pane/status_line_setup.rs b/codex-rs/tui/src/bottom_pane/status_line_setup.rs
+index 63ce4237db..41186909fe 100644
+--- a/codex-rs/tui/src/bottom_pane/status_line_setup.rs
++++ b/codex-rs/tui/src/bottom_pane/status_line_setup.rs
+@@ -17,6 +17,7 @@
+ //! - Context usage (remaining %, used %, window size)
+ //! - Usage limits (primary, secondary)
+ //! - Session info (thread title, thread ID, tokens used)
++//! - Custom command output
+ //! - Application version
+ 
+ use ratatui::buffer::Buffer;
+@@ -142,6 +143,9 @@ pub(crate) enum StatusLineItem {
+ 
+     /// Latest checklist task progress from `update_plan` (if available).
+     TaskProgress,
++
++    /// Output from the configured external status-line command.
++    CustomCommand,
+ }
+ 
+ impl StatusLineItem {
+@@ -194,6 +198,9 @@ impl StatusLineItem {
+             StatusLineItem::TaskProgress => {
+                 "Latest task progress from update_plan (omitted until available)"
+             }
++            StatusLineItem::CustomCommand => {
++                "Output from the configured external status-line command (omitted when unavailable)"
++            }
+         }
+     }
+ 
+@@ -225,6 +232,7 @@ impl StatusLineItem {
+             StatusLineItem::ThreadTitle => StatusSurfacePreviewItem::ThreadTitle,
+             StatusLineItem::WorkspaceHeadline => StatusSurfacePreviewItem::WorkspaceHeadline,
+             StatusLineItem::TaskProgress => StatusSurfacePreviewItem::TaskProgress,
++            StatusLineItem::CustomCommand => StatusSurfacePreviewItem::CustomCommand,
+         }
+     }
+ }
+@@ -519,6 +527,10 @@ mod tests {
+                 StatusLineItem::CurrentDir.preview_item(),
+                 "/repo".to_string(),
+             ),
++            (
++                StatusLineItem::CustomCommand.preview_item(),
++                "custom:status".to_string(),
++            ),
+         ]);
+         let items = [
+             MultiSelectItem {
+@@ -537,6 +549,14 @@ mod tests {
+                 orderable: true,
+                 section_break_after: false,
+             },
++            MultiSelectItem {
++                id: StatusLineItem::CustomCommand.to_string(),
++                name: String::new(),
++                description: None,
++                enabled: true,
++                orderable: true,
++                section_break_after: false,
++            },
+         ];
+ 
+         assert_eq!(
+@@ -548,7 +568,7 @@ mod tests {
+                     /*use_theme_colors*/ true,
+                 )
+             ),
+-            Some("gpt-5 · /repo".to_string())
++            Some("gpt-5 · /repo · custom:status".to_string())
+         );
+     }
+ 
+@@ -642,6 +662,7 @@ mod tests {
+                 StatusLineItem::ModelName.to_string(),
+                 StatusLineItem::CurrentDir.to_string(),
+                 StatusLineItem::GitBranch.to_string(),
++                StatusLineItem::CustomCommand.to_string(),
+             ]),
+             /*use_theme_colors*/ true,
+             StatusSurfacePreviewData::from_iter([
+@@ -661,6 +682,10 @@ mod tests {
+                     StatusLineItem::WeeklyLimit.preview_item(),
+                     "weekly 82% left".to_string(),
+                 ),
++                (
++                    StatusLineItem::CustomCommand.preview_item(),
++                    "custom:status".to_string(),
++                ),
+             ]),
+             AppEventSender::new(tx_raw),
+             crate::keymap::RuntimeKeymap::defaults().list,
+diff --git a/codex-rs/tui/src/bottom_pane/status_line_style.rs b/codex-rs/tui/src/bottom_pane/status_line_style.rs
+index 4198943a4f..0ef725d106 100644
+--- a/codex-rs/tui/src/bottom_pane/status_line_style.rs
++++ b/codex-rs/tui/src/bottom_pane/status_line_style.rs
+@@ -51,6 +51,7 @@ impl StatusLineAccent {
+             StatusLineItem::ApprovalMode => Self::Mode,
+             StatusLineItem::ThreadTitle | StatusLineItem::WorkspaceHeadline => Self::Thread,
+             StatusLineItem::TaskProgress => Self::Progress,
++            StatusLineItem::CustomCommand => Self::Metadata,
+         }
+     }
+ 
+diff --git a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
+index b8b7a6fbd4..0fb9c62e53 100644
+--- a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
++++ b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
+@@ -35,6 +35,7 @@ pub(crate) enum StatusSurfacePreviewItem {
+     ModelWithReasoning,
+     Reasoning,
+     TaskProgress,
++    CustomCommand,
+ }
+ 
+ impl StatusSurfacePreviewItem {
+@@ -68,6 +69,7 @@ impl StatusSurfacePreviewItem {
+             StatusSurfacePreviewItem::ModelWithReasoning => "gpt-5.2-codex medium",
+             StatusSurfacePreviewItem::Reasoning => "medium",
+             StatusSurfacePreviewItem::TaskProgress => "Tasks 0/0",
++            StatusSurfacePreviewItem::CustomCommand => "Custom status",
+         }
+     }
+ 
+@@ -101,6 +103,7 @@ impl StatusSurfacePreviewItem {
+             Self::ModelWithReasoning,
+             Self::Reasoning,
+             Self::TaskProgress,
++            Self::CustomCommand,
+         ]
+         .into_iter()
+     }
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 424e8310f8..d2c224713c 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -406,6 +406,8 @@ use self::status_state::StatusIndicatorState;
+ use self::status_state::StatusState;
+ use self::status_state::TerminalTitleStatusKind;
+ mod status_controls;
++mod status_line_command;
++use self::status_line_command::StatusLineCommandContext;
+ mod status_surfaces;
+ mod streaming;
+ use self::status_surfaces::CachedProjectRootName;
+@@ -741,6 +743,16 @@ pub(crate) struct ChatWidget {
+     status_line_workspace_headline_last_requested_at: Option<Instant>,
+     // Set after the backend reports the workspace-message feature gate is disabled.
+     status_line_workspace_messages_disabled: bool,
++    // Cached output from the configured external status-line command.
++    status_line_command_output: Option<String>,
++    // Command and session context associated with the cached external status-line output.
++    status_line_command_context: Option<StatusLineCommandContext>,
++    // Request ID for the external status-line command currently in flight.
++    status_line_command_pending_request_id: Option<u64>,
++    // Request ID to assign to the next external status-line command invocation.
++    next_status_line_command_request_id: u64,
++    // Last time Codex invoked the external status-line command.
++    status_line_command_last_requested_at: Option<Instant>,
+     // Current thread-goal status shown in the status line when plan mode is inactive.
+     current_goal_status_indicator: Option<GoalStatusIndicator>,
+     current_goal_status: Option<GoalStatusState>,
+@@ -1193,6 +1205,7 @@ impl ChatWidget {
+             self.refresh_terminal_title();
+         }
+         self.refresh_status_line_if_workspace_headline_due();
++        self.refresh_status_line_command_if_due();
+     }
+ 
+     fn flush_active_cell(&mut self) {
+diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
+index 3cc80ce885..aa98dc26de 100644
+--- a/codex-rs/tui/src/chatwidget/constructor.rs
++++ b/codex-rs/tui/src/chatwidget/constructor.rs
+@@ -237,6 +237,11 @@ impl ChatWidget {
+             next_status_line_workspace_headline_request_id: 0,
+             status_line_workspace_headline_last_requested_at: None,
+             status_line_workspace_messages_disabled: false,
++            status_line_command_output: None,
++            status_line_command_context: None,
++            status_line_command_pending_request_id: None,
++            next_status_line_command_request_id: 0,
++            status_line_command_last_requested_at: None,
+             current_goal_status_indicator: None,
+             current_goal_status: None,
+             external_editor_state: ExternalEditorState::Closed,
+diff --git a/codex-rs/tui/src/chatwidget/status_line_command.rs b/codex-rs/tui/src/chatwidget/status_line_command.rs
+new file mode 100644
+index 0000000000..6fde940b0e
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/status_line_command.rs
+@@ -0,0 +1,278 @@
++//! External status-line command lifecycle for `ChatWidget`.
++//!
++//! A configured command runs outside Codex's sandbox with an argv vector rather
++//! than a shell string. Its output is treated as untrusted one-line text and is
++//! bounded before it reaches the TUI.
++
++use std::path::PathBuf;
++use std::process::Stdio;
++use std::time::Duration;
++use std::time::Instant;
++
++use tokio::io::AsyncRead;
++use tokio::io::AsyncReadExt;
++use tokio::process::Child;
++use tokio::process::Command;
++
++use super::ChatWidget;
++use crate::app_event::AppEvent;
++
++const STATUS_LINE_COMMAND_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
++const STATUS_LINE_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
++const MAX_STATUS_LINE_COMMAND_OUTPUT_BYTES: usize = 1_024;
++const MAX_STATUS_LINE_COMMAND_OUTPUT_CHARS: usize = 240;
++
++/// Inputs that identify one external status-line command invocation.
++///
++/// The value doubles as the cache key: output is discarded whenever the command,
++/// active thread, or current directory changes.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(super) struct StatusLineCommandContext {
++    command: Vec<String>,
++    cwd: PathBuf,
++    thread_id: Option<String>,
++}
++
++impl StatusLineCommandContext {
++    pub(super) fn new(
++        command: Vec<String>,
++        cwd: PathBuf,
++        thread_id: Option<String>,
++    ) -> Option<Self> {
++        let program = command.first()?;
++        if program.trim().is_empty() {
++            return None;
++        }
++
++        Some(Self {
++            command,
++            cwd,
++            thread_id,
++        })
++    }
++}
++
++impl ChatWidget {
++    /// Synchronizes the external-command cache with the current status-line selection.
++    pub(super) fn sync_status_line_command_state(&mut self, enabled: bool) {
++        let context = if enabled {
++            self.config
++                .tui_status_line_command
++                .clone()
++                .and_then(|command| {
++                    StatusLineCommandContext::new(
++                        command,
++                        self.status_line_cwd().to_path_buf(),
++                        self.thread_id.as_ref().map(ToString::to_string),
++                    )
++                })
++        } else {
++            None
++        };
++
++        if self.status_line_command_context.as_ref() != context.as_ref() {
++            self.status_line_command_context = context;
++            self.status_line_command_output = None;
++            self.status_line_command_pending_request_id = None;
++            self.status_line_command_last_requested_at = None;
++        }
++
++        self.request_status_line_command_if_due(Instant::now());
++    }
++
++    /// Starts a refresh from a scheduled TUI frame when the command is due.
++    pub(super) fn refresh_status_line_command_if_due(&mut self) {
++        let now = Instant::now();
++        if self.status_line_command_refresh_is_due(now) {
++            self.refresh_status_line();
++            return;
++        }
++
++        if self.status_line_command_context.is_some()
++            && self.status_line_command_pending_request_id.is_none()
++            && let Some(last_requested_at) = self.status_line_command_last_requested_at
++        {
++            let elapsed = now.saturating_duration_since(last_requested_at);
++            self.frame_requester
++                .schedule_frame_in(STATUS_LINE_COMMAND_REFRESH_INTERVAL.saturating_sub(elapsed));
++        }
++    }
++
++    /// Stores the latest external-command output when it belongs to the active request.
++    pub(crate) fn set_status_line_command_output(
++        &mut self,
++        request_id: u64,
++        output: Option<String>,
++    ) -> bool {
++        if self.status_line_command_pending_request_id != Some(request_id) {
++            return false;
++        }
++
++        self.status_line_command_pending_request_id = None;
++        self.status_line_command_output = output;
++        true
++    }
++
++    fn request_status_line_command_if_due(&mut self, now: Instant) {
++        if !self.status_line_command_refresh_is_due(now) {
++            return;
++        }
++
++        let Some(context) = self.status_line_command_context.clone() else {
++            return;
++        };
++        let request_id = self.next_status_line_command_request_id;
++        self.next_status_line_command_request_id = self
++            .next_status_line_command_request_id
++            .wrapping_add(/*rhs*/ 1);
++        self.status_line_command_pending_request_id = Some(request_id);
++        self.status_line_command_last_requested_at = Some(now);
++
++        let tx = self.app_event_tx.clone();
++        tokio::spawn(async move {
++            let output = run_status_line_command(context).await;
++            tx.send(AppEvent::StatusLineCommandUpdated { request_id, output });
++        });
++        self.frame_requester
++            .schedule_frame_in(STATUS_LINE_COMMAND_REFRESH_INTERVAL);
++    }
++
++    fn status_line_command_refresh_is_due(&self, now: Instant) -> bool {
++        self.status_line_command_context.is_some()
++            && self.status_line_command_pending_request_id.is_none()
++            && self
++                .status_line_command_last_requested_at
++                .is_none_or(|last_requested_at| {
++                    now.saturating_duration_since(last_requested_at)
++                        >= STATUS_LINE_COMMAND_REFRESH_INTERVAL
++                })
++    }
++}
++
++pub(super) async fn run_status_line_command(context: StatusLineCommandContext) -> Option<String> {
++    let mut child = match status_line_command_process(&context)?.spawn() {
++        Ok(child) => child,
++        Err(error) => {
++            tracing::trace!(%error, "failed to start status-line command");
++            return None;
++        }
++    };
++    let Some(stdout) = child.stdout.take() else {
++        tracing::trace!("status-line command did not expose stdout");
++        return None;
++    };
++
++    let result = tokio::time::timeout(STATUS_LINE_COMMAND_TIMEOUT, async {
++        tokio::try_join!(child.wait(), read_capped_output(stdout))
++    })
++    .await;
++    let (status, stdout) = match result {
++        Ok(Ok((status, stdout))) => (status, stdout),
++        Ok(Err(error)) => {
++            stop_status_line_command(&mut child).await;
++            tracing::trace!(%error, "failed to read or wait for status-line command");
++            return None;
++        }
++        Err(_) => {
++            stop_status_line_command(&mut child).await;
++            tracing::trace!("status-line command timed out");
++            return None;
++        }
++    };
++    if !status.success() {
++        tracing::trace!(?status, "status-line command exited unsuccessfully");
++        return None;
++    }
++
++    status_line_command_output(&stdout)
++}
++
++fn status_line_command_process(context: &StatusLineCommandContext) -> Option<Command> {
++    let (program, args) = context.command.split_first()?;
++    let mut command = Command::new(program);
++    command
++        .args(args)
++        .current_dir(&context.cwd)
++        .env("CODEX_STATUS_LINE_CWD", &context.cwd)
++        .stdin(Stdio::null())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::null())
++        .kill_on_drop(true);
++    if let Some(thread_id) = &context.thread_id {
++        command.env("CODEX_THREAD_ID", thread_id);
++    } else {
++        command.env_remove("CODEX_THREAD_ID");
++    }
++    Some(command)
++}
++
++async fn stop_status_line_command(child: &mut Child) {
++    if let Err(error) = child.kill().await {
++        tracing::trace!(%error, "failed to stop status-line command");
++    }
++}
++
++async fn read_capped_output<R>(mut reader: R) -> std::io::Result<Vec<u8>>
++where
++    R: AsyncRead + Unpin,
++{
++    let mut output = Vec::with_capacity(MAX_STATUS_LINE_COMMAND_OUTPUT_BYTES);
++    let mut buffer = [0; 512];
++    loop {
++        let read = reader.read(&mut buffer).await?;
++        if read == 0 {
++            return Ok(output);
++        }
++
++        let retained = MAX_STATUS_LINE_COMMAND_OUTPUT_BYTES
++            .saturating_sub(output.len())
++            .min(read);
++        output.extend_from_slice(&buffer[..retained]);
++    }
++}
++
++fn status_line_command_output(stdout: &[u8]) -> Option<String> {
++    let first_line = String::from_utf8_lossy(stdout).lines().next()?.to_string();
++    let mut output = String::new();
++    let mut characters = first_line.chars();
++    while let Some(character) = characters.next() {
++        if character == '\x1b' {
++            match characters.next() {
++                Some('[') => {
++                    for character in characters.by_ref() {
++                        if ('@'..='~').contains(&character) {
++                            break;
++                        }
++                    }
++                }
++                Some(']') | Some('P') | Some('^') | Some('_') => {
++                    let mut escaped = false;
++                    for character in characters.by_ref() {
++                        if character == '\x07' || (escaped && character == '\\') {
++                            break;
++                        }
++                        escaped = character == '\x1b';
++                    }
++                }
++                Some(_) | None => {}
++            }
++            continue;
++        }
++
++        if !character.is_control() {
++            output.push(character);
++        }
++    }
++
++    let output = output.trim();
++    (!output.is_empty()).then(|| {
++        output
++            .chars()
++            .take(MAX_STATUS_LINE_COMMAND_OUTPUT_CHARS)
++            .collect()
++    })
++}
++
++#[cfg(test)]
++#[path = "status_line_command_tests.rs"]
++mod tests;
+diff --git a/codex-rs/tui/src/chatwidget/status_line_command_tests.rs b/codex-rs/tui/src/chatwidget/status_line_command_tests.rs
+new file mode 100644
+index 0000000000..3d3482f71d
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/status_line_command_tests.rs
+@@ -0,0 +1,151 @@
++use std::collections::BTreeMap;
++use std::ffi::OsStr;
++use std::ffi::OsString;
++use std::path::PathBuf;
++use std::process::Command;
++use std::time::Duration;
++
++use pretty_assertions::assert_eq;
++use tokio::io::AsyncWriteExt;
++
++use super::*;
++
++#[test]
++fn command_receives_the_active_thread_and_working_directory() {
++    let cwd = std::env::temp_dir().join("codex-status-line-command");
++    let context = StatusLineCommandContext::new(
++        vec!["status-provider".to_string(), "--format=plain".to_string()],
++        cwd.clone(),
++        Some("thread-123".to_string()),
++    )
++    .expect("configured program should produce a command context");
++    let command = status_line_command_process(&context)
++        .expect("configured program should produce a process command");
++
++    let envs = command
++        .as_std()
++        .get_envs()
++        .map(|(key, value)| (key.to_os_string(), value.map(OsStr::to_os_string)))
++        .collect::<BTreeMap<OsString, Option<OsString>>>();
++    assert_eq!(
++        command.as_std().get_program(),
++        OsStr::new("status-provider")
++    );
++    assert_eq!(
++        command.as_std().get_args().collect::<Vec<_>>(),
++        vec![OsStr::new("--format=plain")]
++    );
++    assert_eq!(command.as_std().get_current_dir(), Some(cwd.as_path()));
++    assert_eq!(
++        envs.get(&OsString::from("CODEX_THREAD_ID")),
++        Some(&Some(OsString::from("thread-123")))
++    );
++    assert_eq!(
++        envs.get(&OsString::from("CODEX_STATUS_LINE_CWD")),
++        Some(&Some(cwd.into_os_string()))
++    );
++}
++
++#[test]
++fn command_output_is_one_safe_trimmed_line() {
++    assert_eq!(
++        status_line_command_output(b"  custom:status\nignored second line\n"),
++        Some("custom:status".to_string())
++    );
++    assert_eq!(
++        status_line_command_output(b"\x1b[31mcustom:status\x1b[0m"),
++        Some("custom:status".to_string())
++    );
++    assert_eq!(
++        status_line_command_output(b"\x1b]0;untrusted title\x07custom:status"),
++        Some("custom:status".to_string())
++    );
++    assert_eq!(status_line_command_output(b"\n"), None);
++
++    let oversized = "a".repeat(MAX_STATUS_LINE_COMMAND_OUTPUT_CHARS + 1);
++    assert_eq!(
++        status_line_command_output(oversized.as_bytes()),
++        Some("a".repeat(MAX_STATUS_LINE_COMMAND_OUTPUT_CHARS))
++    );
++}
++
++#[tokio::test]
++async fn command_output_cap_drains_the_oversized_stream() {
++    let mut source = b"custom:status\n".to_vec();
++    source.resize(MAX_STATUS_LINE_COMMAND_OUTPUT_BYTES * 128, b'x');
++    let (mut writer, reader) = tokio::io::duplex(/*max_buf_size*/ 512);
++    let write = tokio::spawn(async move { writer.write_all(&source).await });
++
++    let output = read_capped_output(reader)
++        .await
++        .expect("output above the limit should be truncated");
++
++    assert_eq!(output.len(), MAX_STATUS_LINE_COMMAND_OUTPUT_BYTES);
++    assert_eq!(
++        status_line_command_output(&output),
++        Some("custom:status".to_string())
++    );
++    tokio::time::timeout(Duration::from_secs(1), write)
++        .await
++        .expect("reader should drain the writer after reaching the output cap")
++        .expect("writer task should complete")
++        .expect("writer should complete");
++}
++
++#[tokio::test]
++async fn command_output_cap_drains_a_child_process() {
++    let executable = std::env::current_exe().expect("current test executable");
++    let listed_tests = Command::new(&executable)
++        .arg("--list")
++        .output()
++        .expect("list test inventory");
++    assert!(listed_tests.status.success());
++    assert!(
++        listed_tests.stdout.len() > MAX_STATUS_LINE_COMMAND_OUTPUT_BYTES * 128,
++        "test inventory should exceed an OS pipe buffer"
++    );
++    let expected_status = status_line_command_output(&listed_tests.stdout)
++        .expect("test inventory should begin with a status line");
++
++    let context = StatusLineCommandContext::new(
++        vec![
++            executable.to_string_lossy().into_owned(),
++            "--list".to_string(),
++        ],
++        std::env::current_dir().expect("current directory"),
++        /*thread_id*/ None,
++    )
++    .expect("test executable should produce a command context");
++
++    assert_eq!(
++        run_status_line_command(context).await,
++        Some(expected_status)
++    );
++}
++
++#[test]
++fn command_without_active_thread_clears_thread_environment() {
++    let context = StatusLineCommandContext::new(
++        vec!["status-provider".to_string()],
++        PathBuf::from("workspace"),
++        None,
++    )
++    .expect("configured program should produce a command context");
++    let command = status_line_command_process(&context)
++        .expect("configured program should produce a process command");
++    let envs = command
++        .as_std()
++        .get_envs()
++        .map(|(key, value)| (key.to_os_string(), value.map(OsStr::to_os_string)))
++        .collect::<BTreeMap<OsString, Option<OsString>>>();
++
++    assert_eq!(envs.get(&OsString::from("CODEX_THREAD_ID")), Some(&None));
++}
++
++#[test]
++fn blank_program_does_not_create_a_command_context() {
++    assert_eq!(
++        StatusLineCommandContext::new(vec!["  ".to_string()], PathBuf::from("workspace"), None,),
++        None
++    );
++}
+diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+index 7120462330..0f9ce0e336 100644
+--- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
++++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+@@ -71,6 +71,11 @@ impl StatusSurfaceSelections {
+         self.status_line_items
+             .contains(&StatusLineItem::WorkspaceHeadline)
+     }
++
++    fn uses_custom_command(&self) -> bool {
++        self.status_line_items
++            .contains(&StatusLineItem::CustomCommand)
++    }
+ }
+ 
+ /// Cached project-root display name keyed by the cwd used for the last lookup.
+@@ -172,6 +177,8 @@ impl ChatWidget {
+         } else {
+             self.request_status_line_workspace_headline_if_due(Instant::now());
+         }
++
++        self.sync_status_line_command_state(selections.uses_custom_command());
+     }
+ 
+     fn refresh_status_line_from_selections(&mut self, selections: &StatusSurfaceSelections) {
+@@ -430,7 +437,7 @@ impl ChatWidget {
+         })
+     }
+ 
+-    fn status_line_cwd(&self) -> &Path {
++    pub(super) fn status_line_cwd(&self) -> &Path {
+         self.current_cwd
+             .as_deref()
+             .unwrap_or(self.config.cwd.as_path())
+@@ -749,6 +756,7 @@ impl ChatWidget {
+             ),
+             StatusLineItem::WorkspaceHeadline => self.status_line_workspace_headline.clone(),
+             StatusLineItem::TaskProgress => self.terminal_title_task_progress(),
++            StatusLineItem::CustomCommand => self.status_line_command_output.clone(),
+         }
+     }
+ 
+@@ -792,6 +800,7 @@ impl ChatWidget {
+             StatusSurfacePreviewItem::Model => StatusLineItem::ModelName,
+             StatusSurfacePreviewItem::ModelWithReasoning => StatusLineItem::ModelWithReasoning,
+             StatusSurfacePreviewItem::Reasoning => StatusLineItem::Reasoning,
++            StatusSurfacePreviewItem::CustomCommand => StatusLineItem::CustomCommand,
+         };
+         self.status_line_value_for_item(status_line_item)
+     }
+diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+index e55364cae8..fca0070f81 100644
+--- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
++++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+@@ -2702,6 +2702,35 @@ async fn status_line_invalid_items_warn_once() {
+     );
+ }
+ 
++#[tokio::test]
++async fn custom_command_status_line_item_uses_cached_output() {
++    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
++    chat.status_line_command_output = Some("custom:status".to_string());
++
++    assert_eq!(
++        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::CustomCommand),
++        Some("custom:status".to_string())
++    );
++}
++
++#[tokio::test]
++async fn custom_command_ignores_stale_output() {
++    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
++    chat.status_line_command_output = Some("previous".to_string());
++    chat.status_line_command_pending_request_id = Some(2);
++
++    assert!(!chat.set_status_line_command_output(1, Some("stale".to_string())));
++    assert_eq!(
++        chat.status_line_command_output,
++        Some("previous".to_string())
++    );
++    assert_eq!(chat.status_line_command_pending_request_id, Some(2));
++
++    assert!(chat.set_status_line_command_output(2, Some("fresh".to_string())));
++    assert_eq!(chat.status_line_command_output, Some("fresh".to_string()));
++    assert_eq!(chat.status_line_command_pending_request_id, None);
++}
++
+ #[tokio::test]
+ async fn status_line_context_used_renders_labeled_percent() {
+     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+diff --git a/docs/config.md b/docs/config.md
+index d35b0a87e3..f2df25c8f6 100644
+--- a/docs/config.md
++++ b/docs/config.md
+@@ -6,6 +6,28 @@ For advanced configuration instructions, see [this documentation](https://develo
+ 
+ For a full configuration reference, see [this documentation](https://developers.openai.com/codex/config-reference).
+ 
++## Add a custom status-line command
++
++To show output from an executable in the Codex TUI status line, add the
++`custom-command` item and its argv vector to your user-level
++`~/.codex/config.toml`:
++
++```toml
++[tui]
++status_line = ["model-with-reasoning", "current-dir", "custom-command"]
++status_line_command = ["my-status-provider", "--format=plain"]
++```
++
++The first value is executed directly and the remaining values are its arguments;
++Codex does not invoke a shell. The command runs from the active working directory
++and receives `CODEX_STATUS_LINE_CWD` plus `CODEX_THREAD_ID` when a thread is active.
++Print a single status line to standard output. Codex refreshes the value periodically
++and omits it if the command fails or times out.
++
++For safety, enable `custom-command` and configure `status_line_command` only in
++user-level configuration. Project-local configuration removes `custom-command`
++from `status_line` and ignores `status_line_command`.
++
+ ## Lifecycle hooks
+ 
+ Admins can set top-level `allow_managed_hooks_only = true` in
