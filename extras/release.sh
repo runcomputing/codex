@@ -2,8 +2,9 @@
 #
 # extras/release.sh — build a patched codex binary for THIS host and publish it.
 #
-# Applies extras/codex-channel.patch onto an upstream stable release tag, builds
-# the codex binary natively for the host platform, strips it, and uploads it to
+# Applies the local customizations in extras/codex-channel.patch onto an upstream
+# stable release tag, builds the codex binary natively for the host platform,
+# strips it, and uploads it to
 # the <tag>-patched GitHub Release on this fork. We patch *release tags*, never
 # main, and build natively per-host (a Mac makes the macOS binary in a few
 # minutes; a Linux x86_64 box makes the static musl binary) — no cross-compiling.
@@ -170,7 +171,7 @@ create_release() {
   gh api -X POST "repos/$REPO/releases" \
     -f tag_name="$PATCHED_TAG" \
     -f name="$PATCHED_TAG" \
-    -f body="codex $UPSTREAM_TAG with the runcomputing talk-channel patch (extras/codex-channel.patch). Built per-platform via extras/release.sh." \
+    -f body="codex $UPSTREAM_TAG with the runcomputing extras patch (extras/codex-channel.patch). Built per-platform via extras/release.sh." \
     -F prerelease="$(github_api_bool "$PRERELEASE")" >/dev/null
 }
 

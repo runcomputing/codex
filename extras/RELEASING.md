@@ -8,8 +8,10 @@ same build. You can run this from anywhere — if you're not already in a
 
 The customizations live in a single patch file applied onto an upstream **release tag** at
 build time — we never maintain a patched branch, and never patch `main`. It currently
-carries MCP channel support, the custom status-line command, and related configuration
-validation.
+carries MCP channel support, the custom status-line command, rich terminal Markdown
+rendering, and related configuration validation. Rich Markdown is opt-in: launch Codex
+with `--enable rich_markdown`, or set `rich_markdown = true` under `[features]` in
+`config.toml`.
 
 ---
 
@@ -160,7 +162,7 @@ REPO="$(git rev-parse --show-toplevel)"
 git worktree add -d /tmp/cdx <tag>
 cd /tmp/cdx
 git apply --3way "$REPO/extras/codex-channel.patch"   # resolve any <<<< conflict markers
-git diff -- codex-rs/ > "$REPO/extras/codex-channel.patch"
+git diff --binary > "$REPO/extras/codex-channel.patch"
 cd "$REPO" && git worktree remove --force /tmp/cdx
 git add extras/codex-channel.patch
 git commit -m "refresh codex-channel.patch for <tag>" && git push
@@ -175,8 +177,9 @@ git commit -m "refresh codex-channel.patch for <tag>" && git push
 | `extras/release.sh` / `release-linux.sh` | build + publish both binaries, per platform |
 | `extras/README.md` | Codex-desktop wiring (`CODEX_CLI_PATH`, the LaunchAgent plist) |
 
-The patch currently carries MCP channel support, the custom status-line command, and
-related configuration validation.
+The patch currently carries MCP channel support, the custom status-line command, rich
+terminal Markdown rendering (opt in with `--enable rich_markdown` or
+`rich_markdown = true` under `[features]`), and related configuration validation.
 
 devx's `install.py` is a pure consumer: it downloads `codex` **and**
 `codex-code-mode-host` from the same (newest complete, non-prerelease) `*-patched`
