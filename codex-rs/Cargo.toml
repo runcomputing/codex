@@ -130,7 +130,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.146.0"
+version = "0.0.0"
 # Track the edition for all workspace crates in one place. Individual
 # crates can still override this value, but keeping it here means new
 # crates created with `cargo new -w ...` automatically inherit the 2024
@@ -152,6 +152,7 @@ codex-app-server-transport = { path = "app-server-transport" }
 codex-app-server-daemon = { path = "app-server-daemon" }
 codex-app-server-client = { path = "app-server-client" }
 codex-app-server-protocol = { path = "app-server-protocol" }
+codex-app-server-protocol-noop-macros = { path = "app-server-protocol-noop-macros" }
 codex-app-server-test-client = { path = "app-server-test-client" }
 codex-apply-patch = { path = "apply-patch" }
 codex-arg0 = { path = "arg0" }
@@ -166,6 +167,7 @@ codex-cloud-tasks-client = { path = "cloud-tasks-client" }
 codex-cloud-tasks-mock-client = { path = "cloud-tasks-mock-client" }
 codex-code-mode = { path = "code-mode" }
 codex-code-mode-protocol = { path = "code-mode-protocol" }
+codex-code-mode-runtime = { path = "code-mode-runtime" }
 codex-home = { path = "codex-home" }
 codex-http-client = { path = "http-client" }
 codex-websocket-client = { path = "websocket-client" }
@@ -302,6 +304,7 @@ color-eyre = "0.6.3"
 constant_time_eq = "0.3.1"
 crossbeam-channel = "0.5.15"
 crypto_box = { version = "0.9.1", features = ["seal"] }
+cosmic-text = "0.19.0"
 crossterm = "0.28.1"
 ctor = "0.6.3"
 deno_core_icudata = "0.77.0"
@@ -348,6 +351,7 @@ log = "0.4"
 lru = "0.16.3"
 maplit = "1.0.2"
 memchr = "2.7.6"
+mermaid-rs-renderer = { version = "0.3.1", default-features = false, features = ["png"] }
 mime_guess = "2.0.5"
 multimap = "0.10.0"
 notify = "8.2.0"
@@ -369,6 +373,7 @@ pulldown-cmark = { version = "0.10", default-features = false }
 quick-xml = "0.41.0"
 rand = "0.9"
 ratatui = "0.29.0"
+ratatui-image = { version = "9.0.0", default-features = false }
 ratatui-macros = "0.6.0"
 rcgen = { version = "0.14.7", default-features = false, features = [
     "aws_lc_rs",
@@ -409,6 +414,7 @@ symphonia = { version = "0.6.0", default-features = false, features = [
     "wav",
 ] }
 socket2 = "0.6.1"
+# When bumping sqlx, audit the SQLite constructor deny list in clippy.toml.
 sqlx = { version = "0.9.0", default-features = false, features = [
     "chrono",
     "json",
@@ -462,7 +468,7 @@ unicode-width = "0.2"
 url = "2"
 urlencoding = "2.1"
 uuid = "1"
-v8 = "=149.2.0"
+v8 = "=150.4.0"
 vt100 = "0.16.2"
 walkdir = "2.5.0"
 webbrowser = "1.0"
@@ -482,6 +488,7 @@ rust = {}
 [workspace.lints.clippy]
 await_holding_invalid_type = "deny"
 await_holding_lock = "deny"
+disallowed_methods = "deny"
 expect_used = "deny"
 identity_op = "deny"
 manual_clamp = "deny"

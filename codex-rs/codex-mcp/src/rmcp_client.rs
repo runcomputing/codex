@@ -18,6 +18,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::channel::MCP_CHANNEL_CAPABILITY;
+use crate::channel::McpChannelNotification;
 use crate::codex_apps::normalize_codex_apps_callable_name;
 use crate::codex_apps::normalize_codex_apps_callable_namespace;
 use crate::codex_apps::normalize_codex_apps_tool_title;
@@ -50,9 +52,11 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpStartupUpdateEvent;
+use codex_protocol::shell_environment::CODEX_THREAD_ID_ENV_VAR;
 use codex_rmcp_client::ExecutorStdioServerLauncher;
 use codex_rmcp_client::LocalStdioServerLauncher;
 use codex_rmcp_client::RmcpClient;
+use codex_rmcp_client::SendCustomNotification;
 use codex_rmcp_client::StdioServerLauncher;
 use codex_rmcp_client::ToolWithConnectorId;
 use codex_rmcp_client::is_authentication_required_error;
@@ -280,6 +284,7 @@ struct ManagedClientStartup {
     runtime_auth_provider: Option<SharedAuthProvider>,
     client_elicitation_capability: ElicitationCapability,
     supports_openai_form_elicitation: bool,
+    channel_notification_tx: Option<Sender<McpChannelNotification>>,
     cancel_token: CancellationToken,
     startup_complete: Arc<AtomicBool>,
 }
@@ -300,6 +305,7 @@ impl ManagedClientStartup {
             runtime_auth_provider,
             client_elicitation_capability,
             supports_openai_form_elicitation,
+            channel_notification_tx,
             cancel_token,
             startup_complete,
         } = self.clone();
@@ -308,6 +314,10 @@ impl ManagedClientStartup {
             .config()
             .startup_timeout_sec
             .unwrap_or(DEFAULT_STARTUP_TIMEOUT);
+        let server_uses_stdio = matches!(
+            &server.config().transport,
+            McpServerTransportConfig::Stdio { .. }
+        );
         let cancel_token_for_fut = cancel_token;
         let tool_catalog_fetch_ticket = tool_catalog_cache_context
             .as_ref()
@@ -353,6 +363,8 @@ impl ManagedClientStartup {
                         tool_catalog_fetch_ticket,
                         client_elicitation_capability,
                         supports_openai_form_elicitation,
+                        channel_notification_tx,
+                        server_uses_stdio,
                     },
                 )
                 .await
@@ -415,6 +427,7 @@ impl AsyncManagedClient {
         runtime_auth_provider: Option<SharedAuthProvider>,
         client_elicitation_capability: ElicitationCapability,
         supports_openai_form_elicitation: bool,
+        channel_notification_tx: Option<Sender<McpChannelNotification>>,
     ) -> Self {
         let is_codex_apps_mcp_server = server_name == CODEX_APPS_MCP_SERVER_NAME;
         let reconnect_server_name = server_name.clone();
@@ -441,6 +454,7 @@ impl AsyncManagedClient {
             runtime_auth_provider,
             client_elicitation_capability,
             supports_openai_form_elicitation,
+            channel_notification_tx,
             cancel_token: cancel_token.clone(),
             startup_complete: Arc::clone(&startup_complete),
         });
@@ -831,17 +845,50 @@ async fn start_server_task(
         tool_catalog_fetch_ticket,
         client_elicitation_capability,
         supports_openai_form_elicitation,
+        channel_notification_tx,
+        server_uses_stdio,
     } = params;
     let params = mcp_initialize_request_params(
         client_elicitation_capability,
         supports_openai_form_elicitation,
     );
     let send_elicitation = elicitation_requests.make_sender(server_name.clone(), tx_event);
+    let channel_notifications_enabled = Arc::new(AtomicBool::new(false));
+    let send_custom_notification = channel_notification_tx.map(|tx| {
+        make_channel_notification_sender(
+            server_name.clone(),
+            tx,
+            Arc::clone(&channel_notifications_enabled),
+        )
+    });
 
-    let initialize_result = client
-        .initialize(params, startup_timeout, send_elicitation)
-        .await
-        .map_err(StartupOutcomeError::from)?;
+    let initialize_result = match send_custom_notification {
+        Some(send_custom_notification) => {
+            client
+                .initialize_with_custom_notification_handler(
+                    params,
+                    startup_timeout,
+                    send_elicitation,
+                    send_custom_notification,
+                )
+                .await
+        }
+        None => {
+            client
+                .initialize(params, startup_timeout, send_elicitation)
+                .await
+        }
+    }
+    .map_err(StartupOutcomeError::from)?;
+
+    let server_supports_channel_notifications = server_uses_stdio
+        && initialize_result
+            .capabilities
+            .experimental
+            .as_ref()
+            .and_then(|exp| exp.get(MCP_CHANNEL_CAPABILITY))
+            .is_some();
+    channel_notifications_enabled.store(server_supports_channel_notifications, Ordering::Release);
 
     let server_disables_tool_catalog_cache = initialize_result
         .capabilities
@@ -876,7 +923,8 @@ async fn start_server_task(
     )
     .await
     .map_err(StartupOutcomeError::from)?;
-    let server_info = mcp_server_info_from_implementation(initialize_result.server_info);
+    let server_info =
+        mcp_server_info_from_implementation(&server_name, initialize_result.server_info);
     let shared_tools = match (codex_apps_tools_cache_context.as_ref(), fetch_ticket) {
         (Some(cache_context), Some(fetch_ticket)) => cache_context.publish_if_newest_accepted(
             fetch_ticket,
@@ -932,7 +980,10 @@ fn mcp_initialize_request_params(
     .with_protocol_version(ProtocolVersion::V_2025_06_18)
 }
 
-fn mcp_server_info_from_implementation(server_info: Implementation) -> McpServerInfo {
+fn mcp_server_info_from_implementation(
+    _server_name: &str,
+    server_info: Implementation,
+) -> McpServerInfo {
     McpServerInfo {
         name: server_info.name,
         title: server_info.title,
@@ -958,8 +1009,47 @@ struct StartServerTaskParams {
     tool_catalog_fetch_ticket: Option<McpToolCatalogFetchTicket>,
     client_elicitation_capability: ElicitationCapability,
     supports_openai_form_elicitation: bool,
+    channel_notification_tx: Option<Sender<McpChannelNotification>>,
+    server_uses_stdio: bool,
 }
 
+fn make_channel_notification_sender(
+    server_name: String,
+    tx: Sender<McpChannelNotification>,
+    enabled: Arc<AtomicBool>,
+) -> SendCustomNotification {
+    Box::new(move |notification| {
+        let server_name = server_name.clone();
+        let tx = tx.clone();
+        let enabled = Arc::clone(&enabled);
+        async move {
+            if !enabled.load(Ordering::Acquire) {
+                return Ok(());
+            }
+
+            let Some(notification) =
+                McpChannelNotification::from_custom_notification(&server_name, &notification)
+            else {
+                return Ok(());
+            };
+
+            match notification {
+                Ok(notification) => {
+                    if tx.send(notification).await.is_err() {
+                        warn!("dropping MCP channel notification because session receiver closed");
+                    }
+                }
+                Err(err) => {
+                    warn!("dropping invalid MCP channel notification from '{server_name}': {err}");
+                }
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 #[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
 async fn make_rmcp_client(
     server_name: &str,
@@ -986,11 +1076,7 @@ async fn make_rmcp_client(
         } => {
             let command_os: OsString = command.into();
             let args_os: Vec<OsString> = args.into_iter().map(Into::into).collect();
-            let env_os = env.map(|env| {
-                env.into_iter()
-                    .map(|(key, value)| (key.into(), value.into()))
-                    .collect::<HashMap<_, _>>()
-            });
+            let env_os = stdio_env_with_runtime_context(env, &runtime_context);
             let launcher = if is_local_environment {
                 // TODO(starr): Unify local stdio MCP launch with
                 // `ExecutorStdioServerLauncher` once the executor-backed path
@@ -1047,13 +1133,41 @@ async fn make_rmcp_client(
     }
 }
 
+fn stdio_env_with_runtime_context(
+    env: Option<HashMap<String, String>>,
+    runtime_context: &McpRuntimeContext,
+) -> Option<HashMap<OsString, OsString>> {
+    let mut env_os = env
+        .map(|env| {
+            env.into_iter()
+                .map(|(key, value)| (key.into(), value.into()))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    if let Some(thread_id) = runtime_context.thread_id() {
+        env_os.insert(
+            OsString::from(CODEX_THREAD_ID_ENV_VAR),
+            OsString::from(thread_id),
+        );
+    }
+
+    if env_os.is_empty() {
+        None
+    } else {
+        Some(env_os)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_exec_server_test_support::environment_manager_without_environments;
     use pretty_assertions::assert_eq;
     use rmcp::model::JsonObject;
     use rmcp::model::Meta;
     use rmcp::transport::auth::AuthError;
+    use std::path::PathBuf;
 
     #[test]
     fn startup_outcome_error_identifies_authentication_required() {
@@ -1063,6 +1177,27 @@ mod tests {
         let error = StartupOutcomeError::from(error);
 
         assert!(error.is_authentication_required());
+    }
+
+    #[test]
+    fn advertised_server_implementation_takes_precedence_over_configured_name() {
+        assert_eq!(
+            mcp_server_info_from_implementation(
+                "configured-server",
+                Implementation::new("advertised-server", "1.2.3")
+                    .with_title("Advertised server")
+                    .with_description("Advertised description")
+                    .with_website_url("https://example.com"),
+            ),
+            McpServerInfo {
+                name: "advertised-server".to_string(),
+                title: Some("Advertised server".to_string()),
+                version: "1.2.3".to_string(),
+                description: Some("Advertised description".to_string()),
+                icons: None,
+                website_url: Some("https://example.com".to_string()),
+            }
+        );
     }
 
     #[test]
@@ -1168,6 +1303,53 @@ mod tests {
         assert_eq!(
             serde_json::to_value(tool_info).expect("serialize actual tool info"),
             serde_json::to_value(expected).expect("serialize expected tool info")
+        );
+    }
+
+    #[test]
+    fn stdio_env_includes_runtime_thread_id() {
+        let runtime_context = McpRuntimeContext::new(
+            Arc::new(environment_manager_without_environments()),
+            PathBuf::from("/tmp"),
+        )
+        .with_thread_id("thread-123");
+
+        let env = stdio_env_with_runtime_context(None, &runtime_context).expect("env overlay");
+
+        assert_eq!(
+            env.get(std::ffi::OsStr::new(CODEX_THREAD_ID_ENV_VAR)),
+            Some(&OsString::from("thread-123"))
+        );
+    }
+
+    #[test]
+    fn stdio_env_runtime_thread_id_overrides_configured_value() {
+        let runtime_context = McpRuntimeContext::new(
+            Arc::new(environment_manager_without_environments()),
+            PathBuf::from("/tmp"),
+        )
+        .with_thread_id("actual-thread");
+        let configured_env = HashMap::from([
+            (
+                CODEX_THREAD_ID_ENV_VAR.to_string(),
+                "configured-thread".to_string(),
+            ),
+            (
+                "TALK_BROKER_URL".to_string(),
+                "http://127.0.0.1".to_string(),
+            ),
+        ]);
+
+        let env =
+            stdio_env_with_runtime_context(Some(configured_env), &runtime_context).expect("env");
+
+        assert_eq!(
+            env.get(std::ffi::OsStr::new(CODEX_THREAD_ID_ENV_VAR)),
+            Some(&OsString::from("actual-thread"))
+        );
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("TALK_BROKER_URL")),
+            Some(&OsString::from("http://127.0.0.1"))
         );
     }
 }

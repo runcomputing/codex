@@ -1,0 +1,6 @@
+---
+source: tui/src/markdown_render_tests.rs
+expression: "format!(\"kitty: {:?}\\nghostty: {:?}\", terminal_render_counts(&kitty),\nterminal_render_counts(&ghostty))"
+---
+kitty: (6, 1)
+ghostty: (0, 7)

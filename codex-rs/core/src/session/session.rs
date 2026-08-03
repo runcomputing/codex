@@ -500,6 +500,7 @@ impl Session {
         models_manager: SharedModelsManager,
         exec_policy: Arc<ExecPolicyManager>,
         tx_event: Sender<Event>,
+        mcp_channel_tx: async_channel::Sender<codex_mcp::McpChannelNotification>,
         agent_status: watch::Sender<AgentStatus>,
         mut initial_history: InitialHistory,
         fork_persistence: ForkPersistence,
@@ -1081,6 +1082,7 @@ impl Session {
                 // Start with an empty connection set. The initialized set is
                 // published after SessionConfigured so MCP events follow it.
                 mcp_runtime,
+                mcp_channel_tx: mcp_channel_tx.clone(),
                 unified_exec_manager: UnifiedExecProcessManager::new(
                     config.background_terminal_max_timeout,
                 ),

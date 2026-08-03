@@ -212,6 +212,42 @@ impl TerminalInfo {
     pub fn is_zellij(&self) -> bool {
         matches!(self.multiplexer, Some(Multiplexer::Zellij { .. }))
     }
+
+    /// Returns whether this terminal can safely render Kitty's OSC 66 text-sizing protocol.
+    ///
+    /// Text sizing is currently limited to direct kitty sessions. Known kitty versions older than
+    /// 0.40 are excluded; kitty does not normally expose its version in the child environment, so
+    /// an unidentified direct kitty session is treated as capable. Multiplexers need their own
+    /// passthrough handling.
+    pub fn supports_kitty_text_sizing(&self) -> bool {
+        if self.multiplexer.is_some() {
+            return false;
+        }
+        match self.name {
+            TerminalName::Kitty => self
+                .version
+                .as_deref()
+                .is_none_or(kitty_version_supports_text_sizing),
+            _ => false,
+        }
+    }
+}
+
+fn kitty_version_supports_text_sizing(version: &str) -> bool {
+    let mut components = version.split('.');
+    let Some(major) = components
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    let Some(minor) = components
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    (major, minor) >= (0, 40)
 }
 
 static TERMINAL_INFO: OnceLock<TerminalInfo> = OnceLock::new();

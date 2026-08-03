@@ -96,6 +96,7 @@ impl AppsRequestProcessor {
                         mcp_servers,
                         submit_id: APPS_INSTALLED_SUBMIT_ID.to_string(),
                         tx_event: None,
+                        channel_notification_tx: None,
                         startup_cancellation_token: cancellation_token.clone(),
                         runtime_context,
                         codex_apps_tools_cache: mcp_manager.codex_apps_tools_cache(),

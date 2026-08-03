@@ -7,8 +7,8 @@
 //!   cells that already hold pre-processed markdown (no fence unwrapping).
 //! - [`append_markdown_agent`] -- for agent responses.  Runs
 //!   [`unwrap_markdown_fences`] first so that `` ```md ``/`` ```markdown ``
-//!   fences containing tables are stripped and `pulldown-cmark` sees raw
-//!   table syntax instead of fenced code.
+//!   fences containing tables, plus whole-document Markdown envelopes containing nested fences,
+//!   are stripped so `pulldown-cmark` sees their Markdown structure instead of fenced code.
 //!
 //! ## Why fence unwrapping exists
 //!
@@ -16,9 +16,7 @@
 //! them as code.  Without unwrapping, `pulldown-cmark` parses those lines
 //! as a fenced code block and renders them as monospace code rather than a
 //! structured table.  The unwrapper is intentionally conservative: it
-//! buffers the entire fence body before deciding, only unwraps fences whose
-//! info string is `md` or `markdown` AND whose body contains a
-//! header+delimiter pair, and degrades gracefully on unclosed fences.
+//! buffers the entire fence body before deciding and degrades gracefully on unclosed fences.
 use ratatui::text::Line;
 use std::borrow::Cow;
 use std::ops::Range;
@@ -68,36 +66,40 @@ pub(crate) fn append_markdown_agent(
     crate::render::line_utils::push_owned_lines(&rendered.lines, lines);
 }
 
-pub(crate) fn render_markdown_agent_with_links_and_cwd(
-    markdown_source: &str,
-    width: Option<usize>,
-    cwd: Option<&Path>,
-) -> Vec<HyperlinkLine> {
-    render_markdown_agent_with_links_cwd_and_visualizations(
-        markdown_source,
-        width,
-        cwd,
-        /*inline_visualization_context*/ None,
-    )
-}
-
+#[cfg(test)]
 pub(crate) fn render_markdown_agent_with_links_cwd_and_visualizations(
     markdown_source: &str,
     width: Option<usize>,
     cwd: Option<&Path>,
     inline_visualization_context: Option<&InlineVisualizationContext>,
 ) -> Vec<HyperlinkLine> {
+    render_markdown_agent_with_links_cwd_visualizations_and_options(
+        markdown_source,
+        width,
+        cwd,
+        inline_visualization_context,
+        crate::markdown_render::MarkdownRenderOptions::default(),
+    )
+}
+
+pub(crate) fn render_markdown_agent_with_links_cwd_visualizations_and_options(
+    markdown_source: &str,
+    width: Option<usize>,
+    cwd: Option<&Path>,
+    inline_visualization_context: Option<&InlineVisualizationContext>,
+    render_options: crate::markdown_render::MarkdownRenderOptions,
+) -> Vec<HyperlinkLine> {
     let rewritten = rewrite_inline_visualizations(markdown_source, inline_visualization_context);
     let normalized = unwrap_markdown_fences(&rewritten.markdown);
     let is_hidden_link_destination =
         |destination: &str| rewritten.trusted_file_links.contains_key(destination);
-    let mut lines =
-        crate::markdown_render::render_markdown_lines_with_width_cwd_and_hidden_link_destinations(
-            &normalized,
-            width,
-            cwd,
-            &is_hidden_link_destination,
-        );
+    let mut lines = crate::markdown_render::render_markdown_lines_with_options(
+        &normalized,
+        width,
+        cwd,
+        &is_hidden_link_destination,
+        render_options,
+    );
     for hyperlink in lines.iter_mut().flat_map(|line| &mut line.hyperlinks) {
         if let Some(link) = rewritten.trusted_file_links.get(&hyperlink.destination) {
             hyperlink.retarget_to_trusted_file(&link.destination);
@@ -111,16 +113,32 @@ pub(crate) fn render_markdown_agent_with_links_cwd_and_visualizations(
 /// Block offsets are mapped back to `markdown_source` after Markdown table fences are unwrapped.
 /// If a normalized boundary cannot be expressed as a raw-source suffix, it is discarded so the
 /// transformed block remains mutable.
+#[cfg(test)]
 pub(crate) fn render_streaming_markdown_agent_with_links_and_cwd(
     markdown_source: &str,
     width: Option<usize>,
     cwd: Option<&Path>,
+) -> crate::markdown_render::StreamingMarkdownRender {
+    render_streaming_markdown_agent_with_links_cwd_and_options(
+        markdown_source,
+        width,
+        cwd,
+        crate::markdown_render::MarkdownRenderOptions::default(),
+    )
+}
+
+pub(crate) fn render_streaming_markdown_agent_with_links_cwd_and_options(
+    markdown_source: &str,
+    width: Option<usize>,
+    cwd: Option<&Path>,
+    render_options: crate::markdown_render::MarkdownRenderOptions,
 ) -> crate::markdown_render::StreamingMarkdownRender {
     let normalized = unwrap_markdown_fences(markdown_source);
     let mut rendered = crate::markdown_render::render_streaming_markdown_lines_with_width_and_cwd(
         &normalized,
         width,
         cwd,
+        render_options,
     );
     if normalized != markdown_source {
         // Fence unwrapping removes opening/closing lines. A normalized tail that is still a raw
@@ -134,18 +152,17 @@ pub(crate) fn render_streaming_markdown_agent_with_links_and_cwd(
     rendered
 }
 
-/// Strip `` ```md ``/`` ```markdown `` fences that contain tables, emitting their content as bare
-/// markdown so `pulldown-cmark` parses the tables natively.
+/// Strip selected `` ```md ``/`` ```markdown `` wrappers, emitting their content as bare Markdown.
 ///
-/// Fences whose info string is not `md` or `markdown` are passed through unchanged.  Markdown
-/// fences that do *not* contain a table (detected by checking for a header row + delimiter row)
-/// are also passed through so that non-table markdown inside a fence still renders as a code
-/// block.
+/// Table fences are unwrapped so `pulldown-cmark` parses the table natively. A fence that encloses
+/// the whole response and contains a nested fenced block is also unwrapped; models commonly use
+/// that shape to return a complete Markdown document containing code samples. Other Markdown
+/// fences remain code blocks.
 ///
 /// The fence unwrapping is intentionally conservative: it buffers the entire fence body before
 /// deciding, and an unclosed fence at end-of-input is re-emitted with its opening line so partial
 /// streams degrade to code display.
-fn unwrap_markdown_fences<'a>(markdown_source: &'a str) -> Cow<'a, str> {
+pub(crate) fn unwrap_markdown_fences<'a>(markdown_source: &'a str) -> Cow<'a, str> {
     // Zero-copy fast path: most messages contain no fences at all.
     if !markdown_source.contains("```") && !markdown_source.contains("~~~") {
         return Cow::Borrowed(markdown_source);
@@ -221,6 +238,43 @@ fn unwrap_markdown_fences<'a>(markdown_source: &'a str) -> Cow<'a, str> {
         } else {
             false
         }
+    }
+
+    fn whole_document_markdown_envelope_body(markdown_source: &str) -> Option<&str> {
+        let trimmed = markdown_source.trim();
+        let opening_end = trimmed.find('\n')?;
+        let opening_line = &trimmed[..opening_end];
+        let (fence, is_markdown) = parse_open_fence(opening_line)?;
+        if !is_markdown || fence.is_blockquoted {
+            return None;
+        }
+
+        let closing_start = trimmed.rfind('\n')?.checked_add(1)?;
+        if closing_start <= opening_end || !is_close_fence(&trimmed[closing_start..], fence) {
+            return None;
+        }
+        let body = &trimmed[opening_end + 1..closing_start];
+        let contains_shorter_nested_fence = body.lines().any(|line| {
+            parse_open_fence(line)
+                .is_some_and(|(nested, _)| nested.marker == fence.marker && nested.len < fence.len)
+        });
+        let mut same_length_nested_fence_open = false;
+        let contains_same_length_nested_fence = body.lines().any(|line| {
+            if is_close_fence(line, fence) {
+                return same_length_nested_fence_open;
+            }
+            if parse_open_fence(line)
+                .is_some_and(|(nested, _)| nested.marker == fence.marker && nested.len == fence.len)
+            {
+                same_length_nested_fence_open = true;
+            }
+            false
+        });
+        (contains_shorter_nested_fence || contains_same_length_nested_fence).then_some(body)
+    }
+
+    if let Some(body) = whole_document_markdown_envelope_body(markdown_source) {
+        return Cow::Borrowed(body);
     }
 
     fn markdown_fence_contains_table(content: &str, is_blockquoted_fence: bool) -> bool {
@@ -543,6 +597,28 @@ mod tests {
         append_markdown_agent(src, /*width*/ None, &mut out);
         let rendered = lines_to_strings(&out);
         assert_eq!(rendered, vec!["**bold**".to_string()]);
+    }
+
+    #[test]
+    fn unwraps_whole_markdown_document_fence_with_nested_code_fences() {
+        let body =
+            "# Heading 1\n\n```rust\nfn main() {}\n```\n\n```mermaid\nflowchart LR; A-->B\n```\n";
+        let src = format!("````markdown\n{body}````\n");
+
+        let normalized = unwrap_markdown_fences(&src);
+
+        assert_eq!(normalized, body);
+    }
+
+    #[test]
+    fn unwraps_triple_markdown_document_envelope_with_nested_code_fences() {
+        let body =
+            "# Heading 1\n\n```rust\nfn main() {}\n```\n\n```mermaid\nflowchart LR; A-->B\n```\n";
+        let src = format!("```markdown\n{body}```\n");
+
+        let normalized = unwrap_markdown_fences(&src);
+
+        assert_eq!(normalized, body);
     }
 
     #[test]

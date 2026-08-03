@@ -38,6 +38,7 @@ use crate::terminal_hyperlinks::plain_hyperlink_lines;
 use crate::terminal_hyperlinks::prefix_hyperlink_lines;
 use crate::terminal_hyperlinks::visible_lines;
 use crate::terminal_hyperlinks::visible_lines_ref;
+use crate::terminal_render::mark_buffer_terminal_rendering;
 #[cfg(test)]
 use crate::test_support::PathBufExt;
 #[cfg(test)]
@@ -324,6 +325,7 @@ impl Renderable for Box<dyn HistoryCell> {
         // entire draw area first so stale glyphs from previous frames never linger.
         Clear.render(area, buf);
         paragraph.scroll((y, 0)).render(area, buf);
+        mark_buffer_terminal_rendering(buf, area, &hyperlink_lines, usize::from(y));
         mark_buffer_hyperlinks(buf, area, &hyperlink_lines, usize::from(y));
     }
     fn desired_height(&self, width: u16) -> u16 {

@@ -1057,6 +1057,11 @@ pub(crate) enum AppEvent {
         cwd: PathBuf,
         summary: crate::chatwidget::StatusLineGitSummary,
     },
+    /// Async update from the configured external status-line command.
+    StatusLineCommandUpdated {
+        request_id: u64,
+        output: Option<String>,
+    },
     /// Async update of the workspace notification headline for status line rendering.
     StatusLineWorkspaceHeadlineUpdated {
         request_id: u64,

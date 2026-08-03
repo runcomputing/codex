@@ -180,6 +180,7 @@ mod style;
 mod terminal_hyperlinks;
 mod terminal_palette;
 mod terminal_probe;
+mod terminal_render;
 mod terminal_title;
 mod terminal_visualization_instructions;
 mod text_formatting;

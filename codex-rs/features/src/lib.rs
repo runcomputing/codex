@@ -114,6 +114,8 @@ pub enum Feature {
     TerminalResizeReflow,
     /// Add terminal-specific visualization guidance to TUI developer instructions.
     TerminalVisualizationInstructions,
+    /// Render terminal-aware Markdown headings, code blocks, and Mermaid diagrams in the TUI.
+    RichMarkdown,
     /// Stream structured progress while apply_patch input is being generated.
     ApplyPatchStreamingEvents,
     /// Allow exec tools to request additional permissions while staying sandboxed.
@@ -922,6 +924,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "terminal_resize_reflow",
         stage: Stage::Removed,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::RichMarkdown,
+        key: "rich_markdown",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::WebSearchRequest,

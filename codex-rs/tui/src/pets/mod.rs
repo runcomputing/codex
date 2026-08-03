@@ -20,6 +20,8 @@ mod asset_pack;
 mod catalog;
 mod frames;
 mod image_protocol;
+#[cfg(not(test))]
+pub(crate) use image_protocol::kitty_inline_graphics_available;
 mod model;
 mod picker;
 mod preview;

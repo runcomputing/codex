@@ -39,7 +39,7 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::HistoryRenderMode;
 use crate::history_cell::{self};
 use crate::inline_visualization::InlineVisualizationContext;
-use crate::markdown::render_markdown_agent_with_links_cwd_and_visualizations;
+use crate::markdown_render::MarkdownRenderOptions;
 use crate::style::proposed_plan_style;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::prefix_hyperlink_lines;
@@ -52,7 +52,6 @@ use std::time::Instant;
 
 use super::StreamState;
 use super::render::StreamingRender;
-use super::render::render_source;
 use super::table_holdback::TableHoldbackScanner;
 use super::table_holdback::TableHoldbackState;
 #[cfg(test)]
@@ -104,16 +103,17 @@ struct StablePrefixLenCache {
 }
 
 impl StreamCore {
-    fn new(
+    fn new_with_render_options(
         width: Option<usize>,
         cwd: &Path,
         render_mode: HistoryRenderMode,
         inline_visualization_context: Option<InlineVisualizationContext>,
+        render_options: MarkdownRenderOptions,
     ) -> Self {
         Self {
             state: StreamState::new(width, cwd),
             width,
-            render: StreamingRender::new(),
+            render: StreamingRender::new_with_options(render_options),
             enqueued_stable_len: 0,
             emitted_stable_len: 0,
             cwd: cwd.to_path_buf(),
@@ -152,6 +152,18 @@ impl StreamCore {
                 self.render_mode,
                 self.inline_visualization_context.as_ref(),
             );
+            if self.holdback_scanner.closed_fence_in_last_chunk() {
+                // The provisional rendering of an open fence can have different line boundaries
+                // from its completed form (and Mermaid can change representation entirely).
+                // Recompute before releasing that region into immutable scrollback.
+                self.render.recompute(
+                    source,
+                    self.width,
+                    self.cwd.as_path(),
+                    self.render_mode,
+                    self.inline_visualization_context.as_ref(),
+                );
+            }
             enqueued = self.sync_stable_queue();
         }
         enqueued
@@ -166,7 +178,7 @@ impl StreamCore {
     /// finished stream into the next answer.
     fn finalize_remaining(&mut self) -> (Vec<HyperlinkLine>, String) {
         let source = self.state.collector.finalize_and_take_source();
-        let mut rendered = render_source(
+        let mut rendered = self.render.render_source(
             &source,
             self.width,
             self.cwd.as_path(),
@@ -399,7 +411,10 @@ impl StreamCore {
             TableHoldbackState::Confirmed { table_start: start }
             | TableHoldbackState::PendingHeader {
                 header_start: start,
-            } => self.tail_budget_from_source_start(start),
+            }
+            | TableHoldbackState::OpenFence { fence_start: start } => {
+                self.tail_budget_from_source_start(start)
+            }
             TableHoldbackState::None => 0,
         };
         tracing::trace!(
@@ -446,10 +461,11 @@ impl StreamCore {
 
         let render_start = Instant::now();
         let source = self.state.collector.committed_source();
-        let stable_prefix_render = render_markdown_agent_with_links_cwd_and_visualizations(
+        let stable_prefix_render = self.render.render_source(
             &source[..source_start.min(source.len())],
             self.width,
-            Some(self.cwd.as_path()),
+            self.cwd.as_path(),
+            self.render_mode,
             self.inline_visualization_context.as_ref(),
         );
         let stable_prefix_len = stable_prefix_render.len();
@@ -493,14 +509,56 @@ impl StreamController {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_render_options(
+        width: Option<usize>,
+        cwd: &Path,
+        render_mode: HistoryRenderMode,
+        render_options: MarkdownRenderOptions,
+    ) -> Self {
+        Self {
+            core: StreamCore::new_with_render_options(
+                width,
+                cwd,
+                render_mode,
+                /*inline_visualization_context*/ None,
+                render_options,
+            ),
+            header_emitted: false,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn new_with_inline_visualizations(
         width: Option<usize>,
         cwd: &Path,
         render_mode: HistoryRenderMode,
         inline_visualization_context: Option<InlineVisualizationContext>,
     ) -> Self {
+        Self::new_with_inline_visualizations_and_options(
+            width,
+            cwd,
+            render_mode,
+            inline_visualization_context,
+            MarkdownRenderOptions::default(),
+        )
+    }
+
+    pub(crate) fn new_with_inline_visualizations_and_options(
+        width: Option<usize>,
+        cwd: &Path,
+        render_mode: HistoryRenderMode,
+        inline_visualization_context: Option<InlineVisualizationContext>,
+        render_options: MarkdownRenderOptions,
+    ) -> Self {
         Self {
-            core: StreamCore::new(width, cwd, render_mode, inline_visualization_context),
+            core: StreamCore::new_with_render_options(
+                width,
+                cwd,
+                render_mode,
+                inline_visualization_context,
+                render_options,
+            ),
             header_emitted: false,
         }
     }
@@ -609,13 +667,24 @@ impl PlanStreamController {
     ///
     /// The width has the same meaning as in `StreamController`: it is the markdown body width, and
     /// callers must update it when the terminal width changes.
+    #[cfg(test)]
     pub(crate) fn new(width: Option<usize>, cwd: &Path, render_mode: HistoryRenderMode) -> Self {
+        Self::new_with_render_options(width, cwd, render_mode, MarkdownRenderOptions::default())
+    }
+
+    pub(crate) fn new_with_render_options(
+        width: Option<usize>,
+        cwd: &Path,
+        render_mode: HistoryRenderMode,
+        render_options: MarkdownRenderOptions,
+    ) -> Self {
         Self {
-            core: StreamCore::new(
+            core: StreamCore::new_with_render_options(
                 width,
                 cwd,
                 render_mode,
                 /*inline_visualization_context*/ None,
+                render_options,
             ),
             header_emitted: false,
             top_padding_emitted: false,
@@ -760,7 +829,9 @@ impl PlanStreamController {
 mod tests {
     use super::*;
     use crate::terminal_hyperlinks::visible_lines;
+    use image::DynamicImage;
     use pretty_assertions::assert_eq;
+    use ratatui::layout::Size;
     use std::path::PathBuf;
 
     fn test_cwd() -> PathBuf {
@@ -838,6 +909,221 @@ mod tests {
             1,
             "expected the streamed heading to be emitted once: {streamed:?}",
         );
+    }
+
+    #[test]
+    fn rich_stream_finalization_uses_the_streams_render_geometry() {
+        let render_options = MarkdownRenderOptions::text_sizing_for_test();
+        let mut ctrl = StreamController::new_with_render_options(
+            Some(80),
+            &test_cwd(),
+            HistoryRenderMode::Rich,
+            render_options,
+        );
+        let stable_source = concat!(
+            "# H1\n\n",
+            "## H2\n\n",
+            "### H3\n\n",
+            "#### H4\n\n",
+            "##### H5\n\n",
+            "###### H6\n\n",
+            "```rust\n",
+            "let answer = 42;\n",
+            "```\n\n",
+        );
+        assert!(ctrl.push(stable_source));
+        let mut streamed = ctrl.core.tick_batch(usize::MAX);
+        assert_eq!(streamed.len(), 31, "expected expanded rich row geometry");
+
+        let mutable_tail = "Trailing paragraph without a newline";
+        assert!(!ctrl.push(mutable_tail));
+        let (remaining, source) = ctrl.core.finalize_remaining();
+        assert!(
+            remaining.iter().all(|line| line.terminal_render.is_none()),
+            "finalization should not restart inside an already-emitted rich heading",
+        );
+        streamed.extend(remaining);
+
+        let expected =
+            crate::markdown::render_markdown_agent_with_links_cwd_visualizations_and_options(
+                &source,
+                Some(80),
+                Some(test_cwd().as_path()),
+                /*inline_visualization_context*/ None,
+                render_options,
+            );
+        assert_eq!(streamed, expected);
+    }
+
+    #[test]
+    fn rich_markdown_envelope_stream_matches_its_unwrapped_final_render() {
+        let render_options = MarkdownRenderOptions::text_sizing_for_test();
+        let mut ctrl = StreamController::new_with_render_options(
+            Some(80),
+            &test_cwd(),
+            HistoryRenderMode::Rich,
+            render_options,
+        );
+        let source = concat!(
+            "\n",
+            "````markdown\n",
+            "# H1\n\n",
+            "## H2\n\n",
+            "### H3\n\n",
+            "```rust\n",
+            "let answer = 42;\n",
+            "```\n",
+            "````\n",
+        );
+        let mut streamed = Vec::new();
+        for line in source.split_inclusive('\n') {
+            ctrl.push(line);
+            streamed.extend(ctrl.core.tick_batch(usize::MAX));
+        }
+        let (remaining, finalized_source) = ctrl.core.finalize_remaining();
+        streamed.extend(remaining);
+
+        let expected =
+            crate::markdown::render_markdown_agent_with_links_cwd_visualizations_and_options(
+                &finalized_source,
+                Some(80),
+                Some(test_cwd().as_path()),
+                /*inline_visualization_context*/ None,
+                render_options,
+            );
+        assert_eq!(streamed, expected);
+    }
+
+    #[test]
+    fn rich_fenced_blocks_stream_match_their_completed_render() {
+        let render_options = MarkdownRenderOptions::text_sizing_for_test();
+        let mut ctrl = StreamController::new_with_render_options(
+            Some(80),
+            &test_cwd(),
+            HistoryRenderMode::Rich,
+            render_options,
+        );
+        let source = concat!(
+            "# Heading\n\n",
+            "```rust\n",
+            "fn main() {\n",
+            "    println!(\"hello\");\n",
+            "}\n",
+            "```\n\n",
+            "```mermaid\n",
+            "flowchart LR\n",
+            "    A --> B\n",
+            "```\n",
+        );
+        let mut streamed = Vec::new();
+        for line in source.split_inclusive('\n') {
+            ctrl.push(line);
+            streamed.extend(ctrl.core.tick_batch(usize::MAX));
+        }
+        let (remaining, finalized_source) = ctrl.core.finalize_remaining();
+        streamed.extend(remaining);
+
+        let expected =
+            crate::markdown::render_markdown_agent_with_links_cwd_visualizations_and_options(
+                &finalized_source,
+                Some(80),
+                Some(test_cwd().as_path()),
+                /*inline_visualization_context*/ None,
+                render_options,
+            );
+        assert_eq!(streamed, expected);
+    }
+
+    #[test]
+    fn smooth_commit_emits_a_terminal_image_as_one_history_cell() {
+        let image = crate::terminal_render::TerminalImage::new(
+            DynamicImage::new_rgba8(/*width*/ 40, /*height*/ 60),
+            Size::new(/*width*/ 4, /*height*/ 3),
+        )
+        .expect("terminal image");
+        let mut lines = Vec::new();
+        let mut first = HyperlinkLine::new(Line::from("    "));
+        first.terminal_render = Some(crate::terminal_render::TerminalLineRender::Image {
+            columns: 0..4,
+            image: image.clone(),
+        });
+        lines.push(first);
+        for row in 1..3 {
+            let mut continuation = HyperlinkLine::new(Line::from("    "));
+            continuation.terminal_render =
+                Some(crate::terminal_render::TerminalLineRender::ImageRow {
+                    columns: 0..4,
+                    image: image.clone(),
+                    row,
+                });
+            lines.push(continuation);
+        }
+        let mut ctrl = stream_controller(Some(80));
+        ctrl.core.state.enqueue(lines);
+
+        let (cell, idle) = ctrl.on_commit_tick();
+        let rendered = cell
+            .expect("terminal image history cell")
+            .display_hyperlink_lines(/*width*/ 80);
+
+        assert!(idle);
+        assert_eq!(rendered.len(), 3);
+        assert!(matches!(
+            rendered[0].terminal_render,
+            Some(crate::terminal_render::TerminalLineRender::Image { .. })
+        ));
+        assert!(matches!(
+            rendered[1].terminal_render,
+            Some(crate::terminal_render::TerminalLineRender::ImageRow { row: 1, .. })
+        ));
+        assert!(matches!(
+            rendered[2].terminal_render,
+            Some(crate::terminal_render::TerminalLineRender::ImageRow { row: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn rich_mixed_fenced_blocks_stream_match_their_completed_render() {
+        let source = concat!(
+            "\n",
+            "    -- Indented code block (4 spaces)\n",
+            "    SELECT *\n",
+            "    FROM \"users\"\n",
+            "    WHERE \"email\" LIKE '%@example.com';\n\n",
+            "````markdown\n",
+            "```sh\n",
+            "printf 'fenced within fenced\\n'\n",
+            "```\n",
+            "````\n\n",
+            "```jsonc\n",
+            "{\n",
+            "  // comment allowed in jsonc\n",
+            "  \"path\": \"C:\\\\Program Files\\\\App\",\n",
+            "  \"regex\": \"^foo.*(bar)?$\"\n",
+            "}\n",
+            "```\n",
+        );
+        let mut ctrl = stream_controller(Some(80));
+        let mut streamed = Vec::new();
+        let mut characters = source.chars();
+        while let Some(first) = characters.next() {
+            let mut delta = first.to_string();
+            if let Some(second) = characters.next() {
+                delta.push(second);
+            }
+            ctrl.push(&delta);
+            streamed.extend(ctrl.core.tick_batch(usize::MAX));
+        }
+        let (remaining, finalized_source) = ctrl.core.finalize_remaining();
+        streamed.extend(remaining);
+
+        let expected = crate::markdown::render_markdown_agent_with_links_cwd_and_visualizations(
+            &finalized_source,
+            Some(80),
+            Some(test_cwd().as_path()),
+            /*inline_visualization_context*/ None,
+        );
+        assert_eq!(streamed, expected);
     }
 
     fn collect_plan_streamed_lines(deltas: &[&str], width: Option<usize>) -> Vec<String> {

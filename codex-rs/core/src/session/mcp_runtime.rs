@@ -156,6 +156,7 @@ impl Session {
             mcp_servers,
             submit_id: desired.submit_id.clone(),
             tx_event: Some(self.get_tx_event()),
+            channel_notification_tx: Some(self.services.mcp_channel_tx.clone()),
             startup_cancellation_token: CancellationToken::new(),
             runtime_context,
             codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),

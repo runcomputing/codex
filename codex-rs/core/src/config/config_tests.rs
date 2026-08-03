@@ -725,6 +725,30 @@ async fn load_config_rejects_missing_auto_compact_fallback_buffer() -> std::io::
 }
 
 #[tokio::test]
+async fn load_config_rejects_orphaned_auto_compact_fallback_buffer() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config_toml = toml::from_str(
+        "[features.token_budget]\nenabled = true\nauto_compact_fallback_buffer_tokens = 8000\n",
+    )
+    .expect("TOML should deserialize");
+
+    let error = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("fallback buffer without fallback prompt should be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        error.to_string(),
+        "features.token_budget.auto_compact_fallback_prompt is required when auto_compact_fallback_buffer_tokens is set"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_config_resolves_rollout_budget() -> std::io::Result<()> {
     let codex_home = tempdir()?;
     let config_toml: ConfigToml = toml::from_str(
@@ -1032,6 +1056,7 @@ fn config_toml_deserializes_model_availability_nux() {
             raw_output_mode: false,
             alternate_screen: AltScreenMode::default(),
             status_line: None,
+            status_line_command: None,
             status_line_use_colors: true,
             terminal_title: None,
             theme: None,
@@ -1080,6 +1105,43 @@ status_line_use_colors = false
             .expect("tui config should deserialize")
             .status_line_use_colors
     );
+}
+
+#[test]
+fn config_toml_deserializes_status_line_command() {
+    let toml = r#"
+[tui]
+status_line_command = ["talk", "statusline"]
+"#;
+    let cfg: ConfigToml =
+        toml::from_str(toml).expect("TOML deserialization should succeed for TUI config");
+
+    assert_eq!(
+        cfg.tui
+            .expect("tui config should deserialize")
+            .status_line_command,
+        Some(vec!["talk".to_string(), "statusline".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn runtime_config_resolves_status_line_command() -> std::io::Result<()> {
+    let command = vec!["talk".to_string(), "statusline".to_string()];
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            tui: Some(Tui {
+                status_line_command: Some(command.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.tui_status_line_command, Some(command));
+    Ok(())
 }
 
 #[test]
@@ -3924,6 +3986,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             raw_output_mode: false,
             alternate_screen: AltScreenMode::Auto,
             status_line: None,
+            status_line_command: None,
             status_line_use_colors: true,
             terminal_title: None,
             theme: None,

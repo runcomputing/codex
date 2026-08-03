@@ -1,6 +1,9 @@
 //! Render composition for the main chat widget surface.
 
 use super::*;
+use crate::terminal_hyperlinks::mark_buffer_hyperlinks;
+use crate::terminal_hyperlinks::visible_lines_ref;
+use crate::terminal_render::mark_buffer_terminal_rendering;
 
 impl ChatWidget {
     pub(crate) fn as_renderable(&self) -> RenderableItem<'_> {
@@ -71,7 +74,8 @@ struct TranscriptAreaRenderable<'a> {
 impl Renderable for TranscriptAreaRenderable<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let area = self.child_area(area);
-        let lines = self.child.display_lines(area.width);
+        let hyperlink_lines = self.child.display_hyperlink_lines(area.width);
+        let lines = visible_lines_ref(&hyperlink_lines);
         let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
         let y = if area.height == 0 {
             0
@@ -83,6 +87,8 @@ impl Renderable for TranscriptAreaRenderable<'_> {
         };
         Clear.render(area, buf);
         paragraph.scroll((y, 0)).render(area, buf);
+        mark_buffer_terminal_rendering(buf, area, &hyperlink_lines, usize::from(y));
+        mark_buffer_hyperlinks(buf, area, &hyperlink_lines, usize::from(y));
     }
 
     fn desired_height(&self, width: u16) -> u16 {
@@ -90,6 +96,10 @@ impl Renderable for TranscriptAreaRenderable<'_> {
         HistoryCell::desired_height(self.child, child_width) + self.top
     }
 }
+
+#[cfg(test)]
+#[path = "rendering_tests.rs"]
+mod tests;
 
 impl TranscriptAreaRenderable<'_> {
     fn child_area(&self, area: Rect) -> Rect {

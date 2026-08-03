@@ -155,10 +155,11 @@ impl ChatWidget {
             // Before starting a plan stream, flush any active exec cell group.
             self.flush_unified_exec_wait_streak();
             self.flush_active_cell();
-            self.plan_stream_controller = Some(PlanStreamController::new(
+            self.plan_stream_controller = Some(PlanStreamController::new_with_render_options(
                 self.current_stream_width(/*reserved_cols*/ 4),
                 &self.config.cwd,
                 self.history_render_mode(),
+                crate::markdown_render::MarkdownRenderOptions::for_features(&self.config.features),
             ));
         }
         if let Some(controller) = self.plan_stream_controller.as_mut()
@@ -213,7 +214,11 @@ impl ChatWidget {
                     .send(AppEvent::ConsolidateProposedPlan(source));
             }
         } else if !plan_text.is_empty() {
-            self.add_to_history(history_cell::new_proposed_plan(plan_text, &self.config.cwd));
+            self.add_to_history(history_cell::new_proposed_plan_with_options(
+                plan_text,
+                &self.config.cwd,
+                crate::markdown_render::MarkdownRenderOptions::for_features(&self.config.features),
+            ));
         } else if let Some(source) = consolidated_plan_source {
             self.note_stream_consolidation_queued();
             self.app_event_tx
@@ -464,12 +469,17 @@ impl ChatWidget {
                     thread_id,
                 )
             });
-            self.stream_controller = Some(StreamController::new_with_inline_visualizations(
-                self.current_stream_width(/*reserved_cols*/ 2),
-                &self.config.cwd,
-                self.history_render_mode(),
-                inline_visualization_context,
-            ));
+            self.stream_controller = Some(
+                StreamController::new_with_inline_visualizations_and_options(
+                    self.current_stream_width(/*reserved_cols*/ 2),
+                    &self.config.cwd,
+                    self.history_render_mode(),
+                    inline_visualization_context,
+                    crate::markdown_render::MarkdownRenderOptions::for_features(
+                        &self.config.features,
+                    ),
+                ),
+            );
         }
         if let Some(controller) = self.stream_controller.as_mut()
             && controller.push(&delta)

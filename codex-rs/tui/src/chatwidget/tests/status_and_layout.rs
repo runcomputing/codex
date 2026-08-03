@@ -2703,6 +2703,35 @@ async fn status_line_invalid_items_warn_once() {
 }
 
 #[tokio::test]
+async fn custom_command_status_line_item_uses_cached_output() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.status_line_command_output = Some("custom:status".to_string());
+
+    assert_eq!(
+        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::CustomCommand),
+        Some("custom:status".to_string())
+    );
+}
+
+#[tokio::test]
+async fn custom_command_ignores_stale_output() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.status_line_command_output = Some("previous".to_string());
+    chat.status_line_command_pending_request_id = Some(2);
+
+    assert!(!chat.set_status_line_command_output(1, Some("stale".to_string())));
+    assert_eq!(
+        chat.status_line_command_output,
+        Some("previous".to_string())
+    );
+    assert_eq!(chat.status_line_command_pending_request_id, Some(2));
+
+    assert!(chat.set_status_line_command_output(2, Some("fresh".to_string())));
+    assert_eq!(chat.status_line_command_output, Some("fresh".to_string()));
+    assert_eq!(chat.status_line_command_pending_request_id, None);
+}
+
+#[tokio::test]
 async fn status_line_context_used_renders_labeled_percent() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
