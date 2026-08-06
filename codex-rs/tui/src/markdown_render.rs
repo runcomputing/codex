@@ -77,8 +77,14 @@ use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 use url::Url;
 
+mod heading;
+mod mermaid;
 mod streaming;
 mod table_key_value;
+
+#[cfg(not(test))]
+use self::heading::HeadingCapabilities;
+use self::heading::HeadingRender;
 
 pub(crate) use streaming::StreamingMarkdownRender;
 pub(crate) use streaming::render_streaming_markdown_lines_with_width_and_cwd;
@@ -87,6 +93,87 @@ const TABLE_COLUMN_GAP: usize = 2;
 const TABLE_CELL_PADDING: usize = 1;
 const TABLE_HEADER_SEPARATOR_CHAR: char = '━';
 const TABLE_BODY_SEPARATOR_CHAR: char = '─';
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MarkdownRenderOptions {
+    rich_text: bool,
+    heading_render: HeadingRender,
+    mermaid_images: bool,
+}
+
+impl MarkdownRenderOptions {
+    pub(crate) fn for_features(features: &codex_features::Features) -> Self {
+        if features.enabled(codex_features::Feature::RichMarkdown) {
+            Self::for_terminal()
+        } else {
+            Self::default()
+        }
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn for_terminal() -> Self {
+        let terminal = codex_terminal_detection::terminal_info();
+        let mermaid_images = crate::pets::kitty_inline_graphics_available();
+        let heading_render = heading::select_render_mode(HeadingCapabilities {
+            kitty_text_sizing: terminal.supports_kitty_text_sizing(),
+            image_rendering: mermaid_images,
+        });
+        Self {
+            rich_text: heading_render != HeadingRender::Plain,
+            heading_render,
+            mermaid_images,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_terminal() -> Self {
+        Self::text_sizing_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn text_sizing_for_test() -> Self {
+        Self {
+            rich_text: true,
+            heading_render: HeadingRender::TextSizing,
+            mermaid_images: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CodeBlockLayout {
+    Fenced,
+    Indented,
+}
+
+/// Whether a fenced block's source ends with a real closing fence line.
+///
+/// `pulldown-cmark` implicitly closes an unterminated fence at end of input, so a streaming
+/// prefix fires `End(CodeBlock)` for a fence that is still receiving body lines. Expensive
+/// completed-form rendering (Mermaid rasterization) must not run for those provisional blocks.
+fn fenced_block_is_explicitly_closed(block_source: &str) -> bool {
+    fn fence_marker(line: &str) -> Option<(char, usize, &str)> {
+        let mut rest = line.trim_start();
+        while let Some(stripped) = rest.strip_prefix('>') {
+            rest = stripped.trim_start();
+        }
+        let marker = rest.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+        let len = rest.chars().take_while(|c| *c == marker).count();
+        (len >= 3).then(|| (marker, len, &rest[len..]))
+    }
+
+    let trimmed = block_source.trim_end();
+    let mut lines = trimmed.lines();
+    let Some((marker, open_len, _)) = lines.next().and_then(fence_marker) else {
+        return true;
+    };
+    let Some(last) = lines.next_back() else {
+        return false;
+    };
+    fence_marker(last).is_some_and(|(close_marker, close_len, rest)| {
+        close_marker == marker && close_len >= open_len && rest.trim().is_empty()
+    })
+}
 
 struct MarkdownStyles {
     h1: Style,
@@ -342,11 +429,34 @@ pub(crate) fn render_markdown_lines_with_width_cwd_and_hidden_link_destinations(
     cwd: Option<&Path>,
     is_hidden_link_destination: &dyn Fn(&str) -> bool,
 ) -> Vec<HyperlinkLine> {
+    render_markdown_lines_with_options(
+        input,
+        width,
+        cwd,
+        is_hidden_link_destination,
+        MarkdownRenderOptions::default(),
+    )
+}
+
+pub(crate) fn render_markdown_lines_with_options(
+    input: &str,
+    width: Option<usize>,
+    cwd: Option<&Path>,
+    is_hidden_link_destination: &dyn Fn(&str) -> bool,
+    render_options: MarkdownRenderOptions,
+) -> Vec<HyperlinkLine> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
     let parser = DecodedTextMerge::new(Parser::new_ext(input, options).into_offset_iter());
-    let mut w = Writer::new(input, parser, width, cwd, is_hidden_link_destination);
+    let mut w = Writer::new(
+        input,
+        parser,
+        width,
+        cwd,
+        is_hidden_link_destination,
+        render_options,
+    );
     w.run();
     w.text
 }
@@ -408,6 +518,11 @@ where
     in_code_block: bool,
     code_block_lang: Option<String>,
     code_block_buffer: String,
+    code_block_layout: CodeBlockLayout,
+    code_block_decorated: bool,
+    code_block_explicitly_closed: bool,
+    heading_level: Option<HeadingLevel>,
+    render_options: MarkdownRenderOptions,
     wrap_width: Option<usize>,
     cwd: Option<PathBuf>,
     is_hidden_link_destination: &'policy dyn Fn(&str) -> bool,
@@ -431,6 +546,7 @@ where
         wrap_width: Option<usize>,
         cwd: Option<&Path>,
         is_hidden_link_destination: &'policy dyn Fn(&str) -> bool,
+        render_options: MarkdownRenderOptions,
     ) -> Self {
         Self {
             input,
@@ -449,6 +565,11 @@ where
             in_code_block: false,
             code_block_lang: None,
             code_block_buffer: String::new(),
+            code_block_layout: CodeBlockLayout::Indented,
+            code_block_decorated: false,
+            code_block_explicitly_closed: true,
+            heading_level: None,
+            render_options,
             wrap_width,
             cwd: cwd.map(Path::to_path_buf),
             is_hidden_link_destination,
@@ -517,15 +638,18 @@ where
             Tag::Heading { level, .. } => self.start_heading(level),
             Tag::BlockQuote => self.start_blockquote(),
             Tag::CodeBlock(kind) => {
-                let indent = match kind {
-                    CodeBlockKind::Fenced(_) => None,
-                    CodeBlockKind::Indented => Some(Span::from(" ".repeat(4))),
+                let (lang, layout) = match kind {
+                    CodeBlockKind::Fenced(lang) => {
+                        (Some(lang.to_string()), CodeBlockLayout::Fenced)
+                    }
+                    CodeBlockKind::Indented => (None, CodeBlockLayout::Indented),
                 };
-                let lang = match kind {
-                    CodeBlockKind::Fenced(lang) => Some(lang.to_string()),
-                    CodeBlockKind::Indented => None,
-                };
-                self.start_codeblock(lang, indent)
+                self.code_block_explicitly_closed = layout == CodeBlockLayout::Indented
+                    || fenced_block_is_explicitly_closed(
+                        &self.input
+                            [range.start.min(self.input.len())..range.end.min(self.input.len())],
+                    );
+                self.start_codeblock(lang, layout)
             }
             Tag::List(start) => self.start_list(start),
             Tag::Item => self.start_item(),
@@ -612,8 +736,13 @@ where
             HeadingLevel::H5 => self.styles.h5,
             HeadingLevel::H6 => self.styles.h6,
         };
-        let content = format!("{} ", "#".repeat(level as usize));
-        self.push_line(Line::from(vec![Span::styled(content, heading_style)]));
+        self.heading_level = Some(level);
+        if self.rich_heading_scale(level).is_some() {
+            self.push_line(Line::default());
+        } else {
+            let content = format!("{} ", "#".repeat(level as usize));
+            self.push_line(Line::from(vec![Span::styled(content, heading_style)]));
+        }
         self.push_inline_style(heading_style);
         self.needs_newline = false;
     }
@@ -622,8 +751,140 @@ where
         if self.in_table_cell() {
             return;
         }
+        if let Some((level, scale)) = self
+            .heading_level
+            .take()
+            .and_then(|level| self.rich_heading_scale(level).map(|scale| (level, scale)))
+        {
+            self.finish_rich_heading(level, scale);
+        }
         self.needs_newline = true;
         self.pop_inline_style();
+    }
+
+    fn rich_heading_scale(&self, level: HeadingLevel) -> Option<u16> {
+        if self.render_options.heading_render == HeadingRender::Plain {
+            return None;
+        }
+        match level {
+            HeadingLevel::H1 => Some(6),
+            HeadingLevel::H2 => Some(5),
+            HeadingLevel::H3 => Some(4),
+            HeadingLevel::H4 => Some(3),
+            HeadingLevel::H5 | HeadingLevel::H6 => Some(2),
+        }
+    }
+
+    fn finish_rich_heading(&mut self, level: HeadingLevel, scale: u16) {
+        match self.render_options.heading_render {
+            HeadingRender::Plain => self.prepend_heading_marker(level),
+            HeadingRender::TextSizing => self.finish_scaled_heading(level, scale),
+            HeadingRender::Image => self.finish_image_heading(level, scale),
+        }
+    }
+
+    fn finish_scaled_heading(&mut self, level: HeadingLevel, scale: u16) {
+        let can_scale = self.current_line_content.as_ref().is_some_and(|line| {
+            let width = line.width();
+            width > 0
+                && line.hyperlinks.is_empty()
+                && self.wrap_width.is_some_and(|wrap_width| {
+                    width.saturating_mul(usize::from(scale)) <= wrap_width
+                })
+        });
+        if can_scale {
+            let Some(line) = self.current_line_content.as_mut() else {
+                return;
+            };
+            let text = line
+                .line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            let width = line.width();
+            let footprint = width * usize::from(scale);
+            line.line
+                .push_span(Span::from(" ".repeat(footprint - width)));
+            line.terminal_render = Some(crate::terminal_render::TerminalLineRender::ScaledText {
+                columns: 0..footprint,
+                text,
+                scale,
+            });
+            self.flush_current_line();
+            for _ in 1..scale {
+                let mut reserved = HyperlinkLine::new(Line::from(" ".repeat(footprint)));
+                reserved.terminal_render =
+                    Some(crate::terminal_render::TerminalLineRender::Reserved {
+                        columns: 0..footprint,
+                    });
+                self.push_hyperlink_line(reserved);
+                self.flush_current_line();
+            }
+        } else {
+            self.prepend_heading_marker(level);
+        }
+    }
+
+    fn finish_image_heading(&mut self, level: HeadingLevel, scale: u16) {
+        let Some((text, available_columns)) = self.current_line_content.as_ref().and_then(|line| {
+            if !line.hyperlinks.is_empty() {
+                return None;
+            }
+            let text = line
+                .line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            self.wrap_width.map(|width| (text, width))
+        }) else {
+            self.prepend_heading_marker(level);
+            return;
+        };
+        let Some(image) = heading::render_heading(&text, scale, available_columns) else {
+            self.prepend_heading_marker(level);
+            return;
+        };
+        let columns = usize::from(image.size().width);
+        let rows = image.size().height;
+        let Some(line) = self.current_line_content.as_mut() else {
+            return;
+        };
+        line.line = Line::from(" ".repeat(columns));
+        line.terminal_render = Some(crate::terminal_render::TerminalLineRender::Image {
+            columns: 0..columns,
+            image: image.clone(),
+        });
+        self.flush_current_line();
+        for row in 1..rows {
+            let mut continuation = HyperlinkLine::new(Line::from(" ".repeat(columns)));
+            continuation.terminal_render =
+                Some(crate::terminal_render::TerminalLineRender::ImageRow {
+                    columns: 0..columns,
+                    image: image.clone(),
+                    row,
+                });
+            self.push_hyperlink_line(continuation);
+            self.flush_current_line();
+        }
+    }
+
+    fn prepend_heading_marker(&mut self, level: HeadingLevel) {
+        if let Some(line) = self.current_line_content.as_mut() {
+            let style = match level {
+                HeadingLevel::H1 => self.styles.h1,
+                HeadingLevel::H2 => self.styles.h2,
+                HeadingLevel::H3 => self.styles.h3,
+                HeadingLevel::H4 => self.styles.h4,
+                HeadingLevel::H5 => self.styles.h5,
+                HeadingLevel::H6 => self.styles.h6,
+            };
+            line.line.spans.insert(
+                0,
+                Span::styled(format!("{} ", "#".repeat(level as usize)), style),
+            );
+        }
     }
 
     fn start_blockquote(&mut self) {
@@ -848,7 +1109,7 @@ where
         self.needs_newline = false;
     }
 
-    fn start_codeblock(&mut self, lang: Option<String>, indent: Option<Span<'static>>) {
+    fn start_codeblock(&mut self, lang: Option<String>, layout: CodeBlockLayout) {
         self.flush_current_line();
         if !self.text.is_empty() {
             self.push_blank_line();
@@ -865,10 +1126,26 @@ where
             .filter(|s| !s.is_empty())
             .map(std::string::ToString::to_string);
         self.code_block_lang = lang;
+        self.code_block_layout = layout;
+        self.code_block_decorated = layout == CodeBlockLayout::Fenced
+            && self.render_options.rich_text
+            && !self.code_block_lang.as_deref().is_some_and(|lang| {
+                lang.eq_ignore_ascii_case("mermaid") && self.render_options.mermaid_images
+            });
         self.code_block_buffer.clear();
 
+        if self.code_block_decorated {
+            let label = self.code_block_lang.as_deref().unwrap_or("code");
+            self.push_line(Line::from(format!("╭─ {label}")).style(Style::default().dim()));
+            self.flush_current_line();
+        }
+
         self.indent_stack.push(IndentContext::new(
-            vec![indent.unwrap_or_default()],
+            vec![match layout {
+                CodeBlockLayout::Fenced if self.code_block_decorated => "│ ".dim(),
+                CodeBlockLayout::Fenced => Span::default(),
+                CodeBlockLayout::Indented => Span::from(" ".repeat(4)),
+            }],
             /*marker*/ None,
             /*is_list*/ false,
         ));
@@ -879,6 +1156,19 @@ where
         // If we buffered code for a known language, syntax-highlight it now.
         if let Some(lang) = self.code_block_lang.take() {
             let code = std::mem::take(&mut self.code_block_buffer);
+            if lang.eq_ignore_ascii_case("mermaid")
+                && self.render_options.mermaid_images
+                && self.code_block_explicitly_closed
+                && let Some(wrap_width) = self.wrap_width
+                && let Some(image) = mermaid::render_mermaid(&code, wrap_width)
+            {
+                self.flush_current_line();
+                self.indent_stack.pop();
+                self.push_mermaid_image(image);
+                self.needs_newline = true;
+                self.in_code_block = false;
+                return;
+            }
             if !code.is_empty() {
                 let highlighted = highlight_code_to_lines(&code, &lang);
                 for hl_line in highlighted {
@@ -890,9 +1180,35 @@ where
             }
         }
 
+        self.flush_current_line();
+        self.indent_stack.pop();
+        if self.code_block_decorated {
+            self.push_line(Line::from("╰─").style(Style::default().dim()));
+            self.flush_current_line();
+        }
         self.needs_newline = true;
         self.in_code_block = false;
-        self.indent_stack.pop();
+    }
+
+    fn push_mermaid_image(&mut self, image: mermaid::MermaidImage) {
+        let size = image.image.size();
+        let columns = usize::from(size.width);
+        let mut first = HyperlinkLine::new(Line::from(" ".repeat(columns)));
+        first.terminal_render = Some(crate::terminal_render::TerminalLineRender::Image {
+            columns: 0..columns,
+            image: image.image.clone(),
+        });
+        self.push_prewrapped_line(first, self.pending_marker_line);
+        for row in 1..size.height {
+            let mut continuation = HyperlinkLine::new(Line::from(" ".repeat(columns)));
+            continuation.terminal_render =
+                Some(crate::terminal_render::TerminalLineRender::ImageRow {
+                    columns: 0..columns,
+                    image: image.image.clone(),
+                    row,
+                });
+            self.push_prewrapped_line(continuation, /*pending_marker_line*/ false);
+        }
     }
 
     fn start_table(&mut self, alignments: Vec<Alignment>) {
@@ -1894,6 +2210,10 @@ where
                     hyperlink.columns =
                         hyperlink.columns.start + shift..hyperlink.columns.end + shift;
                 }
+                line.terminal_render = line
+                    .terminal_render
+                    .as_ref()
+                    .map(|render| render.shifted(shift));
                 line.line = Line::from_iter(spans);
                 self.push_output_line(line.style(style));
             }
@@ -1932,6 +2252,10 @@ where
         for hyperlink in &mut line.hyperlinks {
             hyperlink.columns = hyperlink.columns.start + shift..hyperlink.columns.end + shift;
         }
+        line.terminal_render = line
+            .terminal_render
+            .as_ref()
+            .map(|render| render.shifted(shift));
         line.line = Line::from(spans);
         self.push_output_line(line.style(style));
     }
@@ -1958,9 +2282,11 @@ where
 
     fn push_hyperlink_line(&mut self, line: HyperlinkLine) {
         let hyperlinks = line.hyperlinks;
+        let terminal_render = line.terminal_render;
         self.push_line(line.line);
         if let Some(current) = self.current_line_content.as_mut() {
             current.hyperlinks = hyperlinks;
+            current.terminal_render = terminal_render;
         }
     }
 
@@ -2474,6 +2800,7 @@ mod tests {
             /*wrap_width*/ Some(80),
             /*cwd*/ None,
             &never_hide_link_destination,
+            MarkdownRenderOptions::default(),
         );
         let wrapped = writer.wrap_cell(&cell, /*width*/ 40);
         let rendered = wrapped

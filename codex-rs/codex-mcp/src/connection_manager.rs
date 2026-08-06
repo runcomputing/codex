@@ -169,6 +169,7 @@ impl McpConnectionSet {
             mcp_servers,
             submit_id,
             tx_event,
+            channel_notification_tx,
             startup_cancellation_token,
             runtime_context,
             codex_apps_tools_cache,
@@ -346,6 +347,7 @@ impl McpConnectionSet {
                 runtime_auth_provider,
                 client_elicitation_capability.clone(),
                 supports_openai_form_elicitation,
+                channel_notification_tx.clone(),
             );
             servers.insert(
                 server_name.clone(),

@@ -338,7 +338,13 @@ impl App {
                     &self.transcript_cells,
                 );
                 let consolidated: Arc<dyn HistoryCell> =
-                    Arc::new(history_cell::new_proposed_plan(source, &self.config.cwd));
+                    Arc::new(history_cell::new_proposed_plan_with_options(
+                        source,
+                        &self.config.cwd,
+                        crate::markdown_render::MarkdownRenderOptions::for_features(
+                            &self.config.features,
+                        ),
+                    ));
 
                 if start < end {
                     self.transcript_cells
@@ -2252,6 +2258,15 @@ impl App {
             AppEvent::StatusLineGitSummaryUpdated { cwd, summary } => {
                 self.chat_widget.set_status_line_git_summary(cwd, summary);
                 self.refresh_status_line();
+            }
+            AppEvent::StatusLineCommandUpdated { request_id, output } => {
+                if self
+                    .chat_widget
+                    .set_status_line_command_output(request_id, output)
+                {
+                    self.refresh_status_line();
+                    tui.frame_requester().schedule_frame();
+                }
             }
             AppEvent::StatusLineWorkspaceHeadlineUpdated { request_id, result } => {
                 if self

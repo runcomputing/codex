@@ -728,6 +728,16 @@ pub struct Tui {
     #[serde(default)]
     pub status_line: Option<Vec<String>>,
 
+    /// Executable and argument vector for the `custom-command` status-line item.
+    ///
+    /// Codex executes the first value directly and passes the remaining values as arguments;
+    /// it never invokes a shell. The command receives the current directory as its working
+    /// directory, `CODEX_STATUS_LINE_CWD`, and `CODEX_THREAD_ID` when a thread is active.
+    /// This setting is ignored in project-local config because it can run a local command.
+    #[schemars(length(min = 1))]
+    #[serde(default)]
+    pub status_line_command: Option<Vec<String>>,
+
     /// Color status line items with colors derived from the active syntax theme.
     /// Defaults to `true`.
     #[serde(default = "default_true")]

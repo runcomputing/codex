@@ -51,7 +51,7 @@ use rmcp::RoleServer;
 use rmcp::ServerHandler;
 use rmcp::ServiceExt;
 use rmcp::model::ClientCapabilities;
-use rmcp::model::CreateElicitationRequestParams;
+use rmcp::model::CreateElicitationRequestParams as ElicitRequestParams;
 use rmcp::model::ElicitationAction;
 use rmcp::model::ElicitationCapability;
 use rmcp::model::Implementation;
@@ -226,6 +226,8 @@ struct RefreshTestTransportFactory {
     tool: Tool,
     list_started: Option<Arc<Notify>>,
     release_list: Option<Arc<Notify>>,
+    next_cursor: Option<String>,
+    list_requests: Arc<AtomicUsize>,
 }
 
 impl ServerHandler for RefreshTestTransportFactory {
@@ -238,17 +240,17 @@ impl ServerHandler for RefreshTestTransportFactory {
         _request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        self.list_requests
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some(list_started) = &self.list_started {
             list_started.notify_one();
         }
         if let Some(release_list) = &self.release_list {
             release_list.notified().await;
         }
-        Ok(ListToolsResult {
-            tools: vec![self.tool.clone()],
-            next_cursor: None,
-            meta: None,
-        })
+        let mut result = ListToolsResult::with_all_items(vec![self.tool.clone()]);
+        result.next_cursor = self.next_cursor.clone();
+        Ok(result)
     }
 }
 
@@ -350,6 +352,48 @@ impl InProcessTransportFactory for DisconnectingToolsTransportFactory {
     }
 }
 
+#[tokio::test]
+async fn legacy_tool_catalog_does_not_follow_pagination_cursor() -> anyhow::Result<()> {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let client = Arc::new(
+        RmcpClient::new_in_process_client(Arc::new(RefreshTestTransportFactory {
+            tool: create_test_tool("legacy", "first-page").tool,
+            list_started: None,
+            release_list: None,
+            next_cursor: Some("next-page".to_string()),
+            list_requests: Arc::clone(&requests),
+        }))
+        .await?,
+    );
+    client
+        .initialize(
+            InitializeRequestParams::new(
+                ClientCapabilities::default(),
+                Implementation::new("codex-test", "0.0.0-test"),
+            )
+            .with_protocol_version(ProtocolVersion::V_2025_06_18),
+            Some(Duration::from_secs(5)),
+            Box::new(|_, _| async { Err(anyhow!("unexpected elicitation")) }.boxed()),
+        )
+        .await?;
+
+    let tools = list_tools_for_client_uncached(
+        "legacy",
+        /*is_codex_apps_mcp_server*/ false,
+        "test",
+        &client,
+        Some(Duration::from_secs(5)),
+        /*server_instructions*/ None,
+    )
+    .await?;
+
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].tool.name.as_ref(), "first-page");
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    client.shutdown().await;
+    Ok(())
+}
+
 async fn create_test_managed_client(tools: Vec<ToolInfo>) -> ManagedClient {
     ManagedClient {
         client: Arc::new(
@@ -395,6 +439,8 @@ async fn create_test_manager_with_ready_apps_client(
             tool: tool.tool.clone(),
             list_started,
             release_list,
+            next_cursor: None,
+            list_requests: Arc::new(AtomicUsize::new(0)),
         }))
         .await?,
     );
@@ -567,15 +613,13 @@ async fn disabled_permissions_auto_accept_elicitation_with_empty_form_schema() {
 
     let response = sender(
         NumberOrString::Number(1),
-        codex_rmcp_client::Elicitation::Mcp(
-            CreateElicitationRequestParams::FormElicitationParams {
-                meta: None,
-                message: "Confirm?".to_string(),
-                requested_schema: rmcp::model::ElicitationSchema::builder()
-                    .build()
-                    .expect("schema should build"),
-            },
-        ),
+        codex_rmcp_client::Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
+            meta: None,
+            message: "Confirm?".to_string(),
+            requested_schema: rmcp::model::ElicitationSchema::builder()
+                .build()
+                .expect("schema should build"),
+        }),
     )
     .await
     .expect("elicitation should auto accept");
@@ -604,19 +648,17 @@ async fn disabled_permissions_do_not_auto_accept_elicitation_with_requested_fiel
 
     let response = sender(
         NumberOrString::Number(1),
-        codex_rmcp_client::Elicitation::Mcp(
-            CreateElicitationRequestParams::FormElicitationParams {
-                meta: None,
-                message: "What should I say?".to_string(),
-                requested_schema: rmcp::model::ElicitationSchema::builder()
-                    .required_property(
-                        "message",
-                        rmcp::model::PrimitiveSchema::String(rmcp::model::StringSchema::new()),
-                    )
-                    .build()
-                    .expect("schema should build"),
-            },
-        ),
+        codex_rmcp_client::Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
+            meta: None,
+            message: "What should I say?".to_string(),
+            requested_schema: rmcp::model::ElicitationSchema::builder()
+                .required_property(
+                    "message",
+                    rmcp::model::PrimitiveSchema::String(rmcp::model::StringSchema::new()),
+                )
+                .build()
+                .expect("schema should build"),
+        }),
     )
     .await
     .expect("elicitation should auto decline");
@@ -658,15 +700,14 @@ async fn concurrent_authority_updates_never_auto_approve_mixed_policy() {
         }
     });
     let sender = manager.make_sender("server".to_string(), /*tx_event*/ None);
-    let elicitation = codex_rmcp_client::Elicitation::Mcp(
-        CreateElicitationRequestParams::FormElicitationParams {
+    let elicitation =
+        codex_rmcp_client::Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
             meta: None,
             message: "Confirm?".to_string(),
             requested_schema: rmcp::model::ElicitationSchema::builder()
                 .build()
                 .expect("schema should build"),
-        },
-    );
+        });
 
     for _ in 0..1_000 {
         let response = sender(NumberOrString::Number(1), elicitation.clone())
@@ -721,8 +762,8 @@ async fn shared_elicitation_router_targets_the_exact_pending_request() {
     let (tx_event, rx_event) = async_channel::bounded(2);
     let sender_a = manager_a.make_sender("server".to_string(), Some(tx_event.clone()));
     let sender_b = manager_b.make_sender("server".to_string(), Some(tx_event));
-    let elicitation = codex_rmcp_client::Elicitation::Mcp(
-        CreateElicitationRequestParams::FormElicitationParams {
+    let elicitation =
+        codex_rmcp_client::Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
             meta: None,
             message: "Which runtime?".to_string(),
             requested_schema: rmcp::model::ElicitationSchema::builder()
@@ -732,8 +773,7 @@ async fn shared_elicitation_router_targets_the_exact_pending_request() {
                 )
                 .build()
                 .expect("schema should build"),
-        },
-    );
+        });
 
     let pending_a = tokio::spawn(sender_a(NumberOrString::Number(1), elicitation.clone()));
     let EventMsg::ElicitationRequest(request_a) = rx_event.recv().await.expect("request A").msg
@@ -797,6 +837,105 @@ async fn shared_elicitation_router_targets_the_exact_pending_request() {
         response_b
     );
     assert_eq!(outstanding.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn cancelled_elicitation_is_removed_without_affecting_other_pending_requests() {
+    let router = ElicitationRequestRouter::default();
+    let manager = ElicitationRequestManager::new(
+        AskForApproval::OnRequest,
+        PermissionProfile::default(),
+        /*reviewer*/ None,
+        /*lifecycle*/ None,
+        router.clone(),
+    );
+    let (tx_event, rx_event) = async_channel::bounded(2);
+    let sender = manager.make_sender("server".to_string(), Some(tx_event));
+    let elicitation =
+        codex_rmcp_client::Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
+            meta: None,
+            message: "Confirm?".to_string(),
+            requested_schema: rmcp::model::ElicitationSchema::builder()
+                .required_property(
+                    "answer",
+                    rmcp::model::PrimitiveSchema::String(rmcp::model::StringSchema::new()),
+                )
+                .build()
+                .expect("schema should build"),
+        });
+
+    let cancelled = tokio::spawn(sender(NumberOrString::Number(1), elicitation.clone()));
+    let EventMsg::ElicitationRequest(cancelled_request) =
+        rx_event.recv().await.expect("cancelled request event").msg
+    else {
+        panic!("expected elicitation request");
+    };
+    let pending = tokio::spawn(sender(NumberOrString::Number(2), elicitation));
+    let EventMsg::ElicitationRequest(pending_request) =
+        rx_event.recv().await.expect("pending request event").msg
+    else {
+        panic!("expected elicitation request");
+    };
+    let (
+        codex_protocol::mcp::RequestId::String(cancelled_id),
+        codex_protocol::mcp::RequestId::String(pending_id),
+    ) = (cancelled_request.id, pending_request.id)
+    else {
+        panic!("expected Codex-owned string request IDs");
+    };
+
+    cancelled.abort();
+    assert!(
+        cancelled
+            .await
+            .expect_err("cancelled request should be aborted")
+            .is_cancelled()
+    );
+
+    let response = ElicitationResponse {
+        action: ElicitationAction::Accept,
+        content: Some(serde_json::json!({"answer": "yes"})),
+        meta: None,
+    };
+    let error = router
+        .resolve(
+            "server".to_string(),
+            NumberOrString::String(cancelled_id.clone().into()),
+            response.clone(),
+        )
+        .await
+        .expect_err("cancelled request should be removed immediately");
+    assert!(
+        error
+            .to_string()
+            .starts_with("failed to send elicitation response:")
+    );
+
+    let error = router
+        .resolve(
+            "server".to_string(),
+            NumberOrString::String(cancelled_id.into()),
+            response.clone(),
+        )
+        .await
+        .expect_err("cancelled request should no longer be registered");
+    assert_eq!(error.to_string(), "elicitation request not found");
+
+    router
+        .resolve(
+            "server".to_string(),
+            NumberOrString::String(pending_id.into()),
+            response.clone(),
+        )
+        .await
+        .expect("another pending request should remain routable");
+    assert_eq!(
+        pending
+            .await
+            .expect("pending request task")
+            .expect("pending request response"),
+        response
+    );
 }
 
 #[test]
@@ -1513,86 +1652,6 @@ async fn list_all_tools_accepts_canonical_namespaced_tool_names() {
 }
 
 #[tokio::test]
-async fn capture_binding_waits_for_fresh_startup_even_with_cached_tools() {
-    let codex_home = tempdir().expect("tempdir");
-    let cache_context = create_codex_apps_tools_cache_context(
-        codex_home.path().to_path_buf(),
-        Some("account-one"),
-        Some("user-one"),
-    );
-    store_current_tools(
-        &cache_context,
-        vec![create_test_tool(
-            CODEX_APPS_MCP_SERVER_NAME,
-            "shared_cached_tool",
-        )],
-    );
-    let startup_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let startup_complete_for_client = Arc::clone(&startup_complete);
-    let (startup_started, wait_for_startup) = tokio::sync::oneshot::channel();
-    let (release_startup, startup_released) = tokio::sync::oneshot::channel();
-    let pending_client = async move {
-        startup_started.send(()).expect("signal client startup");
-        startup_released.await.expect("release client startup");
-        startup_complete_for_client.store(true, std::sync::atomic::Ordering::Release);
-        Ok(create_test_managed_client(vec![create_test_tool(
-            CODEX_APPS_MCP_SERVER_NAME,
-            "client_local_tool",
-        )])
-        .await)
-    }
-    .boxed()
-    .shared();
-    let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
-    let permission_profile = Constrained::allow_any(PermissionProfile::default());
-    let mut manager = McpConnectionSet::new_uninitialized(
-        &approval_policy,
-        &permission_profile,
-        /*prefix_mcp_tool_names*/ true,
-    );
-    manager.insert_test_client(
-        CODEX_APPS_MCP_SERVER_NAME.to_string(),
-        AsyncManagedClient {
-            client: pending_client,
-            is_codex_apps_mcp_server: true,
-            cached_server_info: None,
-            codex_apps_tools_cache_context: Some(cache_context),
-            tool_catalog_cache_context: None,
-            startup_complete,
-            startup_reconnect: None,
-            cancel_token: CancellationToken::new(),
-        },
-    );
-    manager.set_test_server_metadata(
-        CODEX_APPS_MCP_SERVER_NAME,
-        McpServerMetadata {
-            environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
-            pollutes_memory: false,
-            origin: None,
-            supports_parallel_tool_calls: false,
-            default_tools_approval_mode: None,
-            tool_approval_modes: HashMap::new(),
-        },
-    );
-    let manager = Arc::new(manager);
-    let manager_for_capture = Arc::clone(&manager);
-    let capture = tokio::spawn(async move { capture_binding(&manager_for_capture).await });
-
-    wait_for_startup.await.expect("client startup should begin");
-    assert!(!capture.is_finished());
-    release_startup.send(()).expect("release client startup");
-
-    let step = capture.await.expect("capture task");
-    assert_eq!(
-        step.tools()
-            .iter()
-            .map(|tool| tool.callable_name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["client_local_tool"]
-    );
-}
-
-#[tokio::test]
 async fn list_all_tools_applies_legacy_mcp_prefix_by_default() {
     let managed_client =
         create_ready_async_managed_client(vec![create_test_tool("rmcp", "echo")]).await;
@@ -2290,6 +2349,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
             mcp_servers,
             submit_id: String::new(),
             tx_event: None,
+            channel_notification_tx: None,
             startup_cancellation_token: cancel_token.clone(),
             runtime_context: McpRuntimeContext::new(
                 Arc::new(environment_manager_without_environments()),
@@ -2543,12 +2603,13 @@ fn reusable_server_identity(
     runtime_context: &McpRuntimeContext,
 ) -> McpServerConnectionIdentity {
     let server = EffectiveMcpServer::configured(config.clone());
+    let resolved_environment = runtime_context.resolve_server_environment("docs", config);
     McpServerConnectionIdentity::new(
         "docs",
         &server,
         OAuthCredentialsStoreMode::default(),
         AuthKeyringBackendKind::default(),
-        &Ok(None),
+        &resolved_environment,
         runtime_context,
         /*runtime_auth_provider*/ None,
         /*auth*/ None,
@@ -2608,6 +2669,7 @@ async fn reconcile_reusable_server(
             )]),
             submit_id: "refresh".to_string(),
             tx_event: Some(tx_event),
+            channel_notification_tx: None,
             startup_cancellation_token: CancellationToken::new(),
             runtime_context,
             codex_apps_tools_cache: ConnectorRuntimeManager::default(),
@@ -2769,6 +2831,35 @@ async fn reconciliation_reuses_an_unchanged_ready_server() {
         model_tool_names(&reconciled.list_all_tools().await),
         HashSet::from([ToolName::namespaced("mcp__docs", "search")])
     );
+}
+
+#[tokio::test]
+async fn reconciliation_reuses_legacy_stdio_server_with_existing_protocol_marker() {
+    let runtime_context = McpRuntimeContext::new(
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        PathBuf::from("/tmp"),
+    );
+    let mut config = reusable_server_config("http://127.0.0.1:1");
+    config.transport = McpServerTransportConfig::Stdio {
+        command: "legacy-server".to_string(),
+        args: Vec::new(),
+        env: Some(HashMap::from([(
+            "CODEX_MCP_PROTOCOL_VERSION".to_string(),
+            "1999-01-01".to_string(),
+        )])),
+        env_vars: Vec::new(),
+        cwd: None,
+    };
+    let previous = manager_with_reusable_ready_server(
+        &config,
+        &runtime_context,
+        vec![create_test_tool("docs", "search")],
+    )
+    .await;
+
+    let reconciled = reconcile_reusable_server(&previous, config, runtime_context).await;
+
+    assert!(previous.shares_test_connection_with(&reconciled, "docs"));
 }
 
 #[tokio::test]

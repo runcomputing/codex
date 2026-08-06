@@ -1,0 +1,36 @@
+---
+source: tui/src/markdown_render_tests.rs
+assertion_line: 82
+expression: summary
+---
+"" | image 0..12x6
+"" | image row 1 0..12
+"" | image row 2 0..12
+"" | image row 3 0..12
+"" | image row 4 0..12
+"" | image row 5 0..12
+"" | plain
+"" | image 0..10x5
+"" | image row 1 0..10
+"" | image row 2 0..10
+"" | image row 3 0..10
+"" | image row 4 0..10
+"" | plain
+"" | image 0..8x4
+"" | image row 1 0..8
+"" | image row 2 0..8
+"" | image row 3 0..8
+"" | plain
+"" | image 0..6x3
+"" | image row 1 0..6
+"" | image row 2 0..6
+"" | plain
+"" | image 0..4x2
+"" | image row 1 0..4
+"" | plain
+"" | image 0..4x2
+"" | image row 1 0..4
+"" | plain
+"╭─ rust" | plain
+"│ let answer = 42;" | plain
+"╰─" | plain

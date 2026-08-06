@@ -254,3 +254,31 @@ model = "gpt-dev"
     .await
     .expect("profile-v2 should allow unrelated legacy profiles in base user config");
 }
+
+#[test]
+fn project_config_ignores_custom_status_line_command() {
+    let mut config: TomlValue = toml::from_str(
+        r#"
+[tui]
+status_line = ["custom-command", "current-dir"]
+status_line_command = ["untrusted-command", "--arg"]
+"#,
+    )
+    .expect("project config should parse");
+
+    assert_eq!(
+        sanitize_project_config(&mut config),
+        vec![
+            "tui.status_line_command".to_string(),
+            "tui.status_line".to_string(),
+        ]
+    );
+    let expected: TomlValue = toml::from_str(
+        r#"
+[tui]
+status_line = ["current-dir"]
+"#,
+    )
+    .expect("sanitized project config should parse");
+    assert_eq!(config, expected);
+}

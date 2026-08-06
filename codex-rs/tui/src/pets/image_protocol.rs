@@ -132,6 +132,14 @@ pub(crate) fn detect_pet_image_support() -> PetImageSupport {
     pet_image_support_for_terminal(&terminal_info())
 }
 
+#[cfg(not(test))]
+pub(crate) fn kitty_inline_graphics_available() -> bool {
+    matches!(
+        detect_pet_image_support().protocol(),
+        Some(ImageProtocol::Kitty)
+    )
+}
+
 fn pet_image_support_for_terminal(info: &TerminalInfo) -> PetImageSupport {
     match info.multiplexer {
         Some(Multiplexer::Tmux { .. }) => {

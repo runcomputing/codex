@@ -624,6 +624,83 @@ fn detects_kitty() {
 }
 
 #[test]
+fn kitty_text_sizing_requires_a_supported_direct_session() {
+    let supported = terminal_info(
+        TerminalName::Kitty,
+        Some("kitty"),
+        Some("0.40.0"),
+        /*term*/ None,
+        /*multiplexer*/ None,
+    );
+    let future = terminal_info(
+        TerminalName::Kitty,
+        Some("kitty"),
+        Some("1.0.0"),
+        /*term*/ None,
+        /*multiplexer*/ None,
+    );
+    let unknown_version = terminal_info(
+        TerminalName::Kitty,
+        /*term_program*/ None,
+        /*version*/ None,
+        /*term*/ None,
+        /*multiplexer*/ None,
+    );
+    let too_old = terminal_info(
+        TerminalName::Kitty,
+        Some("kitty"),
+        Some("0.39.1"),
+        /*term*/ None,
+        /*multiplexer*/ None,
+    );
+    let malformed_version = terminal_info(
+        TerminalName::Kitty,
+        Some("kitty"),
+        Some("nightly"),
+        /*term*/ None,
+        /*multiplexer*/ None,
+    );
+    let multiplexed = terminal_info(
+        TerminalName::Kitty,
+        Some("kitty"),
+        Some("0.40.0"),
+        /*term*/ None,
+        Some(Multiplexer::Tmux { version: None }),
+    );
+    let ghostty = terminal_info(
+        TerminalName::Ghostty,
+        Some("ghostty"),
+        Some("1.3.1"),
+        Some("xterm-ghostty"),
+        /*multiplexer*/ None,
+    );
+    let multiplexed_ghostty = terminal_info(
+        TerminalName::Ghostty,
+        Some("ghostty"),
+        Some("1.3.1"),
+        Some("xterm-ghostty"),
+        Some(Multiplexer::Tmux { version: None }),
+    );
+    let wezterm = terminal_info(
+        TerminalName::WezTerm,
+        Some("WezTerm"),
+        Some("20260731"),
+        /*term*/ None,
+        /*multiplexer*/ None,
+    );
+
+    assert!(supported.supports_kitty_text_sizing());
+    assert!(future.supports_kitty_text_sizing());
+    assert!(unknown_version.supports_kitty_text_sizing());
+    assert!(!too_old.supports_kitty_text_sizing());
+    assert!(!malformed_version.supports_kitty_text_sizing());
+    assert!(!multiplexed.supports_kitty_text_sizing());
+    assert!(!ghostty.supports_kitty_text_sizing());
+    assert!(!multiplexed_ghostty.supports_kitty_text_sizing());
+    assert!(!wezterm.supports_kitty_text_sizing());
+}
+
+#[test]
 fn detects_alacritty() {
     let env = FakeEnvironment::new().with_var("ALACRITTY_SOCKET", "/tmp/alacritty");
     let terminal = detect_terminal_info_from_env(&env);

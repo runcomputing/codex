@@ -12,6 +12,7 @@ use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::decorate_spans;
 use crate::terminal_hyperlinks::plain_hyperlink_lines;
 use crate::terminal_hyperlinks::remap_wrapped_line;
+use crate::terminal_render::decorate_terminal_spans;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
 use crate::wrapping::line_contains_url_like;
@@ -132,25 +133,29 @@ where
     let mut wrapped_rows = 0usize;
 
     for line in lines {
-        let line_wrapped = match wrap_policy {
-            HistoryLineWrapPolicy::Terminal => vec![line.clone()],
-            HistoryLineWrapPolicy::PreWrap
-                if line_contains_url_like(&line.line)
-                    && !line_has_mixed_url_and_non_url_tokens(&line.line) =>
-            {
-                vec![line.clone()]
+        let line_wrapped = if line.terminal_render.is_some() {
+            vec![line.clone()]
+        } else {
+            match wrap_policy {
+                HistoryLineWrapPolicy::Terminal => vec![line.clone()],
+                HistoryLineWrapPolicy::PreWrap
+                    if line_contains_url_like(&line.line)
+                        && !line_has_mixed_url_and_non_url_tokens(&line.line) =>
+                {
+                    vec![line.clone()]
+                }
+                HistoryLineWrapPolicy::PreWrap => remap_wrapped_line(
+                    line,
+                    adaptive_wrap_line(
+                        &line.line,
+                        RtOptions::new(wrap_width)
+                            .subsequent_indent(leading_whitespace_prefix(&line.line)),
+                    )
+                    .into_iter()
+                    .map(|line| line_to_static(&line))
+                    .collect(),
+                ),
             }
-            HistoryLineWrapPolicy::PreWrap => remap_wrapped_line(
-                line,
-                adaptive_wrap_line(
-                    &line.line,
-                    RtOptions::new(wrap_width)
-                        .subsequent_indent(leading_whitespace_prefix(&line.line)),
-                )
-                .into_iter()
-                .map(|line| line_to_static(&line))
-                .collect(),
-            ),
         };
         wrapped_rows += line_wrapped
             .iter()
@@ -235,10 +240,7 @@ where
             // fetch/restore the cursor position. insert_history_lines should be cursor-position-neutral :)
             queue!(writer, MoveTo(/*x*/ 0, cursor_top))?;
 
-            for line in &wrapped {
-                queue!(writer, Print("\r\n"))?;
-                write_history_line(writer, line, wrap_width)?;
-            }
+            write_standard_history_lines(writer, &wrapped, wrap_width, area.top(), cursor_top)?;
 
             queue!(writer, ResetScrollRegion)?;
             queue!(writer, MoveTo(last_cursor_pos.x, last_cursor_pos.y))?;
@@ -253,6 +255,101 @@ where
     }
 
     Ok(())
+}
+
+/// Write finalized lines at the bottom of the scroll region.
+///
+/// Kitty image placeholders occupy terminal cells, so scrolling between rows of one image can
+/// move a partial placement before its remaining rows exist. Reserve the entire footprint first,
+/// then fill those stable rows using absolute cursor positions. Ratatui-image's opaque Kitty row
+/// symbols contain their own cursor movement, so relative movement after a row would apply twice.
+fn write_standard_history_lines<W: Write>(
+    writer: &mut W,
+    lines: &[HyperlinkLine],
+    wrap_width: usize,
+    scroll_region_rows: u16,
+    initial_cursor_row: u16,
+) -> io::Result<()> {
+    let scroll_region_bottom = scroll_region_rows.saturating_sub(1);
+    let mut cursor_row = initial_cursor_row.min(scroll_region_bottom);
+    let mut index = 0;
+    while index < lines.len() {
+        if let Some(group_height) =
+            terminal_image_group_height(&lines[index..], wrap_width, scroll_region_rows)
+        {
+            for _ in 0..group_height {
+                queue!(writer, Print("\r\n"))?;
+            }
+            let group_bottom = cursor_row
+                .saturating_add(group_height)
+                .min(scroll_region_bottom);
+            let group_top = group_bottom + 1 - group_height;
+            for row in 0..group_height {
+                queue!(writer, MoveTo(/*x*/ 0, group_top + row))?;
+                write_history_line(writer, &lines[index + usize::from(row)], wrap_width)?;
+            }
+            queue!(writer, MoveTo(/*x*/ 0, group_bottom))?;
+            cursor_row = group_bottom;
+            index += usize::from(group_height);
+        } else {
+            queue!(writer, Print("\r\n"))?;
+            write_history_line(writer, &lines[index], wrap_width)?;
+            let physical_rows = lines[index].width().max(1).div_ceil(wrap_width) as u16;
+            cursor_row = cursor_row
+                .saturating_add(physical_rows)
+                .min(scroll_region_bottom);
+            if matches!(
+                lines[index].terminal_render.as_ref(),
+                Some(
+                    crate::terminal_render::TerminalLineRender::Image { .. }
+                        | crate::terminal_render::TerminalLineRender::ImageRow { .. }
+                )
+            ) {
+                // Malformed or over-height image groups fall back to row-at-a-time output. Their
+                // opaque Ratatui symbols still move the cursor, so restore the modeled position.
+                queue!(writer, MoveTo(/*x*/ 0, cursor_row))?;
+            }
+            index += 1;
+        }
+    }
+    Ok(())
+}
+
+fn terminal_image_group_height(
+    lines: &[HyperlinkLine],
+    wrap_width: usize,
+    max_atomic_rows: u16,
+) -> Option<u16> {
+    let crate::terminal_render::TerminalLineRender::Image { columns, image } =
+        lines.first()?.terminal_render.as_ref()?
+    else {
+        return None;
+    };
+    let height = image.size().height;
+    if height > max_atomic_rows || lines.len() < usize::from(height) {
+        return None;
+    }
+    for row in 0..height {
+        let line = &lines[usize::from(row)];
+        if line.width().max(1).div_ceil(wrap_width) != 1 {
+            return None;
+        }
+        if row == 0 {
+            continue;
+        }
+        let Some(crate::terminal_render::TerminalLineRender::ImageRow {
+            columns: row_columns,
+            image: row_image,
+            row: image_row,
+        }) = line.terminal_render.as_ref()
+        else {
+            return None;
+        };
+        if row_columns != columns || row_image != image || *image_row != row {
+            return None;
+        }
+    }
+    Some(height)
 }
 
 pub(crate) fn leading_whitespace_prefix(line: &Line<'_>) -> Line<'static> {
@@ -284,6 +381,13 @@ fn write_history_line<W: Write>(
     line: &HyperlinkLine,
     wrap_width: usize,
 ) -> io::Result<()> {
+    if line
+        .terminal_render
+        .as_ref()
+        .is_some_and(crate::terminal_render::TerminalLineRender::is_reserved)
+    {
+        return Ok(());
+    }
     let physical_rows = line.width().max(1).div_ceil(wrap_width) as u16;
     if physical_rows > 1 {
         queue!(writer, SavePosition)?;
@@ -323,8 +427,10 @@ fn write_history_line<W: Write>(
     let merged_line = HyperlinkLine {
         line: Line::from(merged_spans),
         hyperlinks: line.hyperlinks.clone(),
+        terminal_render: line.terminal_render.clone(),
     };
-    let decorated = decorate_spans(&merged_line);
+    let decorated =
+        decorate_terminal_spans(&merged_line).unwrap_or_else(|| decorate_spans(&merged_line));
     write_spans(writer, decorated.iter())
 }
 
@@ -481,6 +587,7 @@ mod tests {
     use super::*;
     use crate::markdown_render::render_markdown_text;
     use crate::test_backend::VT100Backend;
+    use image::DynamicImage;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
 
@@ -523,6 +630,169 @@ mod tests {
         let output = String::from_utf8(actual).expect("UTF-8 terminal output");
         assert!(output.contains("\x1b]8;;https://example.com/long/path\x07"));
         assert_eq!(line.line.spans[0].content, destination);
+    }
+
+    #[test]
+    fn writes_scaled_heading_escape_instead_of_placeholder_text() {
+        let mut line = HyperlinkLine::new(Line::from("Title     "));
+        line.terminal_render = Some(crate::terminal_render::TerminalLineRender::ScaledText {
+            columns: 0..10,
+            text: "Title".to_string(),
+            scale: 2,
+        });
+        let mut actual = Vec::new();
+
+        write_history_line(&mut actual, &line, /*wrap_width*/ 80).expect("write history line");
+
+        let output = String::from_utf8(actual).expect("UTF-8 terminal output");
+        assert!(output.contains("\x1b]66;s=2;Title\x07"));
+        assert!(!output.contains("Title     "));
+    }
+
+    #[test]
+    fn reserved_terminal_row_emits_no_output() {
+        let mut line = HyperlinkLine::new(Line::from("          "));
+        line.terminal_render =
+            Some(crate::terminal_render::TerminalLineRender::Reserved { columns: 0..10 });
+        let mut actual = Vec::new();
+
+        write_history_line(&mut actual, &line, /*wrap_width*/ 80).expect("write history line");
+
+        assert!(actual.is_empty());
+    }
+
+    fn terminal_image_lines(width: u16, height: u16) -> Vec<HyperlinkLine> {
+        let (cell_width, cell_height) = crate::terminal_render::terminal_cell_size();
+        let image = crate::terminal_render::TerminalImage::new(
+            DynamicImage::new_rgba8(
+                u32::from(width) * u32::from(cell_width),
+                u32::from(height) * u32::from(cell_height),
+            ),
+            Size::new(width, height),
+        )
+        .expect("terminal image");
+        let columns = usize::from(image.size().width);
+        let mut lines = Vec::new();
+        let mut first = HyperlinkLine::new(Line::from(" ".repeat(columns)));
+        first.terminal_render = Some(crate::terminal_render::TerminalLineRender::Image {
+            columns: 0..columns,
+            image: image.clone(),
+        });
+        lines.push(first);
+        for row in 1..image.size().height {
+            let mut continuation = HyperlinkLine::new(Line::from(" ".repeat(columns)));
+            continuation.terminal_render =
+                Some(crate::terminal_render::TerminalLineRender::ImageRow {
+                    columns: 0..columns,
+                    image: image.clone(),
+                    row,
+                });
+            lines.push(continuation);
+        }
+        lines
+    }
+
+    #[test]
+    fn multi_row_terminal_image_is_reserved_before_placement() {
+        let lines = terminal_image_lines(/*width*/ 4, /*height*/ 3);
+        let mut actual = Vec::new();
+
+        write_standard_history_lines(
+            &mut actual,
+            &lines,
+            /*wrap_width*/ 80,
+            /*scroll_region_rows*/ 3,
+            /*initial_cursor_row*/ 2,
+        )
+        .expect("write image group");
+
+        let output = String::from_utf8(actual).expect("UTF-8 terminal output");
+        assert!(output.starts_with("\r\n\r\n\r\n\x1b[1;1H"));
+        assert_eq!(output.matches("\r\n").count(), 3);
+        assert!(!output.contains("\x1b[1B\x1b[1G"));
+        assert_eq!(output.matches("a=T,U=1,f=32,t=d").count(), 1);
+
+        let mut terminal = vt100::Parser::new(
+            /*rows*/ 12, /*cols*/ 80, /*scrollback_len*/ 0,
+        );
+        terminal.process(b"\x1b[1;3r\x1b[3;1H");
+        terminal.process(output.as_bytes());
+        let placeholder_rows = (0..12)
+            .filter(|row| {
+                terminal
+                    .screen()
+                    .cell(*row, /*col*/ 0)
+                    .is_some_and(|cell| cell.contents().contains('\u{10eeee}'))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(placeholder_rows, vec![0, 1, 2]);
+        assert_eq!(terminal.screen().cursor_position(), (2, 0));
+    }
+
+    #[test]
+    fn multi_row_terminal_image_follows_the_current_history_cursor() {
+        let lines = terminal_image_lines(/*width*/ 4, /*height*/ 3);
+        let mut output = Vec::new();
+        write_standard_history_lines(
+            &mut output,
+            &lines,
+            /*wrap_width*/ 80,
+            /*scroll_region_rows*/ 10,
+            /*initial_cursor_row*/ 1,
+        )
+        .expect("write image group");
+
+        let mut terminal = vt100::Parser::new(
+            /*rows*/ 12, /*cols*/ 80, /*scrollback_len*/ 0,
+        );
+        terminal.process(b"\x1b[1;10r\x1b[2;1H");
+        terminal.process(&output);
+        let placeholder_rows = (0..12)
+            .filter(|row| {
+                terminal
+                    .screen()
+                    .cell(*row, /*col*/ 0)
+                    .is_some_and(|cell| cell.contents().contains('\u{10eeee}'))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(placeholder_rows, vec![2, 3, 4]);
+        assert_eq!(terminal.screen().cursor_position(), (4, 0));
+    }
+
+    #[test]
+    fn terminal_image_tracks_wrapped_history_lines_before_and_after_it() {
+        let mut lines = vec![HyperlinkLine::new(Line::from("abcdefghijklmno"))];
+        lines.extend(terminal_image_lines(/*width*/ 4, /*height*/ 3));
+        lines.push(HyperlinkLine::new(Line::from("after")));
+        let mut output = Vec::new();
+
+        write_standard_history_lines(
+            &mut output,
+            &lines,
+            /*wrap_width*/ 8,
+            /*scroll_region_rows*/ 10,
+            /*initial_cursor_row*/ 1,
+        )
+        .expect("write history lines");
+
+        let mut terminal =
+            vt100::Parser::new(/*rows*/ 12, /*cols*/ 8, /*scrollback_len*/ 0);
+        terminal.process(b"\x1b[1;10r\x1b[2;1H");
+        terminal.process(&output);
+        let placeholder_rows = (0..12)
+            .filter(|row| {
+                terminal
+                    .screen()
+                    .cell(*row, /*col*/ 0)
+                    .is_some_and(|cell| cell.contents().contains('\u{10eeee}'))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(placeholder_rows, vec![4, 5, 6]);
+        assert_eq!(
+            terminal.screen().rows(/*start*/ 0, /*width*/ 8).nth(7),
+            Some("after".to_string())
+        );
+        assert_eq!(terminal.screen().cursor_position(), (7, 5));
     }
 
     #[test]

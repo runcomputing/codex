@@ -969,6 +969,27 @@ fn sanitize_project_config(config: &mut TomlValue) -> Vec<String> {
     {
         ignored_keys.push("features.respect_system_proxy".to_string());
     }
+    let (ignored_status_line_command, ignored_custom_status_line_item) =
+        if let Some(tui) = table.get_mut("tui").and_then(TomlValue::as_table_mut) {
+            let ignored_status_line_command = tui.remove("status_line_command").is_some();
+            let ignored_custom_status_line_item = tui
+                .get_mut("status_line")
+                .and_then(TomlValue::as_array_mut)
+                .is_some_and(|status_line| {
+                    let original_len = status_line.len();
+                    status_line.retain(|item| item.as_str() != Some("custom-command"));
+                    status_line.len() != original_len
+                });
+            (ignored_status_line_command, ignored_custom_status_line_item)
+        } else {
+            (false, false)
+        };
+    if ignored_status_line_command {
+        ignored_keys.push("tui.status_line_command".to_string());
+    }
+    if ignored_custom_status_line_item {
+        ignored_keys.push("tui.status_line".to_string());
+    }
 
     ignored_keys
 }

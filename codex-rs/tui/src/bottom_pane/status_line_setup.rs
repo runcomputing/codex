@@ -17,6 +17,7 @@
 //! - Context usage (remaining %, used %, window size)
 //! - Usage limits (primary, secondary)
 //! - Session info (thread title, thread ID, tokens used)
+//! - Custom command output
 //! - Application version
 
 use ratatui::buffer::Buffer;
@@ -142,6 +143,9 @@ pub(crate) enum StatusLineItem {
 
     /// Latest checklist task progress from `update_plan` (if available).
     TaskProgress,
+
+    /// Output from the configured external status-line command.
+    CustomCommand,
 }
 
 impl StatusLineItem {
@@ -194,6 +198,9 @@ impl StatusLineItem {
             StatusLineItem::TaskProgress => {
                 "Latest task progress from update_plan (omitted until available)"
             }
+            StatusLineItem::CustomCommand => {
+                "Output from the configured external status-line command (omitted when unavailable)"
+            }
         }
     }
 
@@ -225,6 +232,7 @@ impl StatusLineItem {
             StatusLineItem::ThreadTitle => StatusSurfacePreviewItem::ThreadTitle,
             StatusLineItem::WorkspaceHeadline => StatusSurfacePreviewItem::WorkspaceHeadline,
             StatusLineItem::TaskProgress => StatusSurfacePreviewItem::TaskProgress,
+            StatusLineItem::CustomCommand => StatusSurfacePreviewItem::CustomCommand,
         }
     }
 }
@@ -519,6 +527,10 @@ mod tests {
                 StatusLineItem::CurrentDir.preview_item(),
                 "/repo".to_string(),
             ),
+            (
+                StatusLineItem::CustomCommand.preview_item(),
+                "custom:status".to_string(),
+            ),
         ]);
         let items = [
             MultiSelectItem {
@@ -537,6 +549,14 @@ mod tests {
                 orderable: true,
                 section_break_after: false,
             },
+            MultiSelectItem {
+                id: StatusLineItem::CustomCommand.to_string(),
+                name: String::new(),
+                description: None,
+                enabled: true,
+                orderable: true,
+                section_break_after: false,
+            },
         ];
 
         assert_eq!(
@@ -548,7 +568,7 @@ mod tests {
                     /*use_theme_colors*/ true,
                 )
             ),
-            Some("gpt-5 · /repo".to_string())
+            Some("gpt-5 · /repo · custom:status".to_string())
         );
     }
 
@@ -642,6 +662,7 @@ mod tests {
                 StatusLineItem::ModelName.to_string(),
                 StatusLineItem::CurrentDir.to_string(),
                 StatusLineItem::GitBranch.to_string(),
+                StatusLineItem::CustomCommand.to_string(),
             ]),
             /*use_theme_colors*/ true,
             StatusSurfacePreviewData::from_iter([
@@ -660,6 +681,10 @@ mod tests {
                 (
                     StatusLineItem::WeeklyLimit.preview_item(),
                     "weekly 82% left".to_string(),
+                ),
+                (
+                    StatusLineItem::CustomCommand.preview_item(),
+                    "custom:status".to_string(),
                 ),
             ]),
             AppEventSender::new(tx_raw),

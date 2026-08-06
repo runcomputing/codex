@@ -1,5 +1,8 @@
 pub use binding::McpBinding;
 pub use binding::PreparedMcpCall;
+pub use channel::MCP_CHANNEL_CAPABILITY;
+pub use channel::MCP_CHANNEL_NOTIFICATION_METHOD;
+pub use channel::McpChannelNotification;
 pub use connection_manager::tool_is_model_visible;
 pub use elicitation::ElicitationLifecycle;
 pub use elicitation::ElicitationReviewRequest;
@@ -86,6 +89,7 @@ pub(crate) mod auth_elicitation;
 mod binding;
 pub(crate) mod binding_clients;
 mod catalog;
+pub(crate) mod channel;
 pub(crate) mod codex_apps;
 pub(crate) mod connection_manager;
 pub(crate) mod elicitation;

@@ -666,6 +666,9 @@
             "responses_websockets_v2": {
               "type": "boolean"
             },
+            "rich_markdown": {
+              "type": "boolean"
+            },
             "rollout_budget": {
               "$ref": "#/definitions/FeatureToml_for_RolloutBudgetConfigToml"
             },
@@ -3445,6 +3448,15 @@
           },
           "type": "array"
         },
+        "status_line_command": {
+          "default": null,
+          "description": "Executable and argument vector for the `custom-command` status-line item.\n\nCodex executes the first value directly and passes the remaining values as arguments; it never invokes a shell. The command receives the current directory as its working directory, `CODEX_STATUS_LINE_CWD`, and `CODEX_THREAD_ID` when a thread is active. This setting is ignored in project-local config because it can run a local command.",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
         "status_line_use_colors": {
           "default": true,
           "description": "Color status line items with colors derived from the active syntax theme. Defaults to `true`.",
@@ -5217,6 +5229,9 @@
           "type": "boolean"
         },
         "responses_websockets_v2": {
+          "type": "boolean"
+        },
+        "rich_markdown": {
           "type": "boolean"
         },
         "rollout_budget": {

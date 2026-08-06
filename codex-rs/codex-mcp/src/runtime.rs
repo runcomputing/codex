@@ -38,6 +38,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::McpConfig;
 use crate::binding::McpBinding;
+use crate::channel::McpChannelNotification;
 use crate::connection_manager::McpConnectionSet;
 use crate::elicitation::ElicitationLifecycle;
 use crate::elicitation::ElicitationRequestRouter;
@@ -54,6 +55,7 @@ pub struct McpRuntimeInput {
     pub mcp_servers: HashMap<String, EffectiveMcpServer>,
     pub submit_id: String,
     pub tx_event: Option<Sender<Event>>,
+    pub channel_notification_tx: Option<Sender<McpChannelNotification>>,
     pub startup_cancellation_token: CancellationToken,
     pub runtime_context: McpRuntimeContext,
     pub codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
@@ -342,12 +344,14 @@ pub struct SandboxState {
 /// Runtime context used when resolving per-server MCP environments.
 ///
 /// `McpConfig` describes what servers exist. This value carries the canonical
-/// environment registry plus the local stdio fallback cwd used when a local
-/// stdio server omits its own working directory.
+/// environment registry, the local stdio fallback cwd used when a local stdio
+/// server omits its own working directory, and optional session identity for
+/// servers launched in a thread context.
 #[derive(Clone)]
 pub struct McpRuntimeContext {
     environment_manager: Arc<EnvironmentManager>,
     local_stdio_fallback_cwd: PathBuf,
+    thread_id: Option<String>,
 }
 
 impl McpRuntimeContext {
@@ -358,7 +362,15 @@ impl McpRuntimeContext {
         Self {
             environment_manager,
             local_stdio_fallback_cwd,
+            thread_id: None,
         }
+    }
+
+    /// Attach the Codex thread id for MCP servers launched on behalf of a
+    /// session.
+    pub fn with_thread_id(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = Some(thread_id.into());
+        self
     }
 
     pub(crate) fn local_stdio_fallback_cwd(&self) -> PathBuf {
@@ -369,6 +381,10 @@ impl McpRuntimeContext {
         Arc::new(RouteAwareHttpClient::new(
             self.environment_manager.http_client_factory().clone(),
         ))
+    }
+
+    pub(crate) fn thread_id(&self) -> Option<&str> {
+        self.thread_id.as_deref()
     }
 
     pub(crate) fn resolve_server_environment(
