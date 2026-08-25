@@ -1341,6 +1341,105 @@ async fn cancelled_elicitation_is_removed_without_affecting_other_pending_reques
     );
 }
 
+#[tokio::test]
+async fn cancelled_elicitation_is_removed_without_affecting_other_pending_requests() {
+    let router = ElicitationRequestRouter::default();
+    let manager = ElicitationRequestManager::new(
+        AskForApproval::OnRequest,
+        PermissionProfile::default(),
+        /*reviewer*/ None,
+        /*lifecycle*/ None,
+        router.clone(),
+    );
+    let (tx_event, rx_event) = async_channel::bounded(2);
+    let sender = manager.make_sender("server".to_string(), Some(tx_event));
+    let elicitation =
+        codex_rmcp_client::Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
+            meta: None,
+            message: "Confirm?".to_string(),
+            requested_schema: rmcp::model::ElicitationSchema::builder()
+                .required_property(
+                    "answer",
+                    rmcp::model::PrimitiveSchema::String(rmcp::model::StringSchema::new()),
+                )
+                .build()
+                .expect("schema should build"),
+        });
+
+    let cancelled = tokio::spawn(sender(NumberOrString::Number(1), elicitation.clone()));
+    let EventMsg::ElicitationRequest(cancelled_request) =
+        rx_event.recv().await.expect("cancelled request event").msg
+    else {
+        panic!("expected elicitation request");
+    };
+    let pending = tokio::spawn(sender(NumberOrString::Number(2), elicitation));
+    let EventMsg::ElicitationRequest(pending_request) =
+        rx_event.recv().await.expect("pending request event").msg
+    else {
+        panic!("expected elicitation request");
+    };
+    let (
+        codex_protocol::mcp::RequestId::String(cancelled_id),
+        codex_protocol::mcp::RequestId::String(pending_id),
+    ) = (cancelled_request.id, pending_request.id)
+    else {
+        panic!("expected Codex-owned string request IDs");
+    };
+
+    cancelled.abort();
+    assert!(
+        cancelled
+            .await
+            .expect_err("cancelled request should be aborted")
+            .is_cancelled()
+    );
+
+    let response = ElicitationResponse {
+        action: ElicitationAction::Accept,
+        content: Some(serde_json::json!({"answer": "yes"})),
+        meta: None,
+    };
+    let error = router
+        .resolve(
+            "server".to_string(),
+            NumberOrString::String(cancelled_id.clone().into()),
+            response.clone(),
+        )
+        .await
+        .expect_err("cancelled request should be removed immediately");
+    assert!(
+        error
+            .to_string()
+            .starts_with("failed to send elicitation response:")
+    );
+
+    let error = router
+        .resolve(
+            "server".to_string(),
+            NumberOrString::String(cancelled_id.into()),
+            response.clone(),
+        )
+        .await
+        .expect_err("cancelled request should no longer be registered");
+    assert_eq!(error.to_string(), "elicitation request not found");
+
+    router
+        .resolve(
+            "server".to_string(),
+            NumberOrString::String(pending_id.into()),
+            response.clone(),
+        )
+        .await
+        .expect("another pending request should remain routable");
+    assert_eq!(
+        pending
+            .await
+            .expect("pending request task")
+            .expect("pending request response"),
+        response
+    );
+}
+
 #[test]
 fn test_normalize_tools_short_non_duplicated_names() {
     let tools = vec![
@@ -1719,6 +1818,7 @@ async fn codex_apps_extension_does_not_share_host_owned_tools_cache() -> anyhow:
             )]),
             submit_id: "cache-ownership-test".to_string(),
             tx_event: None,
+            channel_notification_tx: None,
             startup_cancellation_token,
             runtime_context: McpRuntimeContext::new(
                 Arc::new(environment_manager_without_environments()),
@@ -3593,6 +3693,7 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
                 mcp_servers,
                 submit_id: "security-test".to_string(),
                 tx_event: None,
+                channel_notification_tx: None,
                 startup_cancellation_token: CancellationToken::new(),
                 runtime_context: runtime_context.clone(),
                 codex_apps_tools_cache: ConnectorRuntimeManager::default(),
@@ -3709,6 +3810,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
             mcp_servers,
             submit_id: String::new(),
             tx_event: None,
+            channel_notification_tx: None,
             startup_cancellation_token: cancel_token.clone(),
             runtime_context: McpRuntimeContext::new(
                 Arc::new(environment_manager_without_environments()),
@@ -4106,6 +4208,7 @@ async fn reconcile_reusable_server(
             )]),
             submit_id: "refresh".to_string(),
             tx_event: Some(tx_event),
+            channel_notification_tx: None,
             startup_cancellation_token: CancellationToken::new(),
             runtime_context,
             codex_apps_tools_cache: ConnectorRuntimeManager::default(),
@@ -4494,6 +4597,7 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
             )]),
             submit_id: "refresh".to_string(),
             tx_event: None,
+            channel_notification_tx: None,
             startup_cancellation_token: CancellationToken::new(),
             runtime_context,
             codex_apps_tools_cache: ConnectorRuntimeManager::default(),
@@ -4552,6 +4656,7 @@ async fn reconciliation_reuses_legacy_stdio_server_when_modern_protocol_is_enabl
             )]),
             submit_id: "refresh".to_string(),
             tx_event: None,
+            channel_notification_tx: None,
             startup_cancellation_token: CancellationToken::new(),
             runtime_context,
             codex_apps_tools_cache: ConnectorRuntimeManager::default(),

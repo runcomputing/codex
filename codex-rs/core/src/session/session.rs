@@ -652,6 +652,7 @@ impl Session {
         model_info: ModelInfo,
         exec_policy: Arc<ExecPolicyManager>,
         tx_event: Sender<Event>,
+        mcp_channel_tx: async_channel::Sender<codex_mcp::McpChannelNotification>,
         agent_status: watch::Sender<AgentStatus>,
         mut initial_history: InitialHistory,
         fork_persistence: ForkPersistence,
@@ -1344,6 +1345,7 @@ impl Session {
                 // published after SessionConfigured so MCP events follow it.
                 mcp_runtime,
                 mcp_handler_cache: Default::default(),
+                mcp_channel_tx: mcp_channel_tx.clone(),
                 unified_exec_manager: UnifiedExecProcessManager::new(
                     config.background_terminal_max_timeout,
                 ),

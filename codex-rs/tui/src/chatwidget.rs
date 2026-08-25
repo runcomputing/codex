@@ -423,6 +423,8 @@ use self::status_state::StatusIndicatorState;
 use self::status_state::StatusState;
 use self::status_state::TerminalTitleStatusKind;
 mod status_controls;
+mod status_line_command;
+use self::status_line_command::StatusLineCommandContext;
 mod status_surfaces;
 mod streaming;
 use self::status_surfaces::CachedProjectRootName;
@@ -773,6 +775,16 @@ pub(crate) struct ChatWidget {
     status_line_workspace_messages_disabled: bool,
     // Cached backend-estimated cost and bounded refresh state for the current thread.
     thread_usage: thread_usage::ThreadUsageState,
+    // Cached output from the configured external status-line command.
+    status_line_command_output: Option<String>,
+    // Command and session context associated with the cached external status-line output.
+    status_line_command_context: Option<StatusLineCommandContext>,
+    // Request ID for the external status-line command currently in flight.
+    status_line_command_pending_request_id: Option<u64>,
+    // Request ID to assign to the next external status-line command invocation.
+    next_status_line_command_request_id: u64,
+    // Last time Codex invoked the external status-line command.
+    status_line_command_last_requested_at: Option<Instant>,
     // Current thread-goal status shown in the status line when plan mode is inactive.
     current_goal_status_indicator: Option<GoalStatusIndicator>,
     current_goal_status: Option<GoalStatusState>,
@@ -1241,6 +1253,7 @@ impl ChatWidget {
         }
         self.refresh_status_line_if_workspace_headline_due();
         self.refresh_thread_usage_if_settlement_due();
+        self.refresh_status_line_command_if_due();
     }
 
     fn flush_active_cell(&mut self) {

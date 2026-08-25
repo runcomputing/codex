@@ -45,6 +45,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::McpConfig;
 use crate::binding::McpBinding;
+use crate::channel::McpChannelNotification;
 use crate::connection_manager::McpConnectionSet;
 use crate::elicitation::ElicitationLifecycle;
 use crate::elicitation::ElicitationRequestRouter;
@@ -72,6 +73,7 @@ pub struct McpRuntimeInput {
     pub mcp_servers: HashMap<String, EffectiveMcpServer>,
     pub submit_id: String,
     pub tx_event: Option<Sender<Event>>,
+    pub channel_notification_tx: Option<Sender<McpChannelNotification>>,
     pub startup_cancellation_token: CancellationToken,
     pub runtime_context: McpRuntimeContext,
     pub codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
@@ -523,12 +525,14 @@ pub struct SandboxState {
 /// Runtime context used when resolving per-server MCP environments.
 ///
 /// `McpConfig` describes what servers exist. This value carries the canonical
-/// environment registry plus the host-local cwd used by local MCP processes.
+/// environment registry plus the host-local cwd used by local MCP processes,
+/// and optional session identity for servers launched in a thread context.
 #[derive(Clone)]
 pub struct McpRuntimeContext {
     environment_manager: Arc<EnvironmentManager>,
     local_process_cwd: PathBuf,
     local_http_client: Arc<dyn HttpClient>,
+    thread_id: Option<String>,
 }
 
 /// Applies the local HTTP headers helper configured for an MCP server.
@@ -572,6 +576,7 @@ impl McpRuntimeContext {
             environment_manager,
             local_process_cwd,
             local_http_client,
+            thread_id: None,
         }
     }
 
@@ -579,8 +584,19 @@ impl McpRuntimeContext {
         self.local_process_cwd.clone()
     }
 
+    /// Attach the Codex thread id for MCP servers launched on behalf of a
+    /// session.
+    pub fn with_thread_id(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = Some(thread_id.into());
+        self
+    }
+
     fn local_http_client(&self) -> Arc<dyn HttpClient> {
         Arc::clone(&self.local_http_client)
+    }
+
+    pub(crate) fn thread_id(&self) -> Option<&str> {
+        self.thread_id.as_deref()
     }
 
     pub(crate) fn resolve_server_environment(

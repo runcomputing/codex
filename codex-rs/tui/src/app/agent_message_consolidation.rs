@@ -54,13 +54,15 @@ impl App {
             tracing::debug!(
                 "ConsolidateAgentMessage: replacing cells [{start}..{end}] with AgentMarkdownCell"
             );
-            let consolidated: Arc<dyn HistoryCell> = Arc::new(
-                history_cell::AgentMarkdownCell::new_with_inline_visualizations(
+            let consolidated: Arc<dyn HistoryCell> =
+                Arc::new(history_cell::AgentMarkdownCell::new_with_render_options(
                     source,
                     &cwd,
                     inline_visualization_context,
-                ),
-            );
+                    crate::markdown_render::MarkdownRenderOptions::for_features(
+                        &self.config.features,
+                    ),
+                ));
             self.transcript_cells
                 .splice(start..end, std::iter::once(consolidated.clone()));
 

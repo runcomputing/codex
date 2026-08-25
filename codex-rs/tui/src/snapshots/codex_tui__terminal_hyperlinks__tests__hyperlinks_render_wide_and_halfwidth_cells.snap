@@ -1,0 +1,7 @@
+---
+source: tui/src/terminal_hyperlinks.rs
+assertion_line: 907
+expression: terminal.backend()
+---
+prefix 漢字 ｶﾞ 
+tail

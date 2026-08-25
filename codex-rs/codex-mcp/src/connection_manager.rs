@@ -207,6 +207,7 @@ impl McpConnectionSet {
             mcp_servers,
             submit_id,
             tx_event,
+            channel_notification_tx,
             startup_cancellation_token,
             runtime_context,
             codex_apps_tools_cache,
@@ -511,6 +512,7 @@ impl McpConnectionSet {
                 client_mcp_extensions.clone(),
                 protocol_mode,
                 catalog_item_limit,
+                channel_notification_tx.clone(),
             );
             let defer_startup = allow_deferred_startup
                 && !tool_plugin_provenance.is_selected_plugin_mcp_server(&server_name)

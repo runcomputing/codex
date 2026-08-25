@@ -142,7 +142,8 @@ impl Session {
         let runtime_context = McpRuntimeContext::new(
             self.services.turn_environments.environment_manager(),
             local_process_cwd,
-        );
+        )
+        .with_thread_id(self.thread_id().to_string());
         (mcp_config, runtime_context)
     }
 

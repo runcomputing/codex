@@ -448,6 +448,7 @@ pub(crate) struct AgentMarkdownCell {
     markdown_source: String,
     cwd: PathBuf,
     inline_visualization_context: Option<crate::inline_visualization::InlineVisualizationContext>,
+    render_options: crate::markdown_render::MarkdownRenderOptions,
     rendered_lines: Option<MarkdownRenderCache>,
 }
 
@@ -466,12 +467,29 @@ impl AgentMarkdownCell {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_inline_visualizations(
         markdown_source: String,
         cwd: &Path,
         inline_visualization_context: Option<
             crate::inline_visualization::InlineVisualizationContext,
         >,
+    ) -> Self {
+        Self::new_with_render_options(
+            markdown_source,
+            cwd,
+            inline_visualization_context,
+            crate::markdown_render::MarkdownRenderOptions::default(),
+        )
+    }
+
+    pub(crate) fn new_with_render_options(
+        markdown_source: String,
+        cwd: &Path,
+        inline_visualization_context: Option<
+            crate::inline_visualization::InlineVisualizationContext,
+        >,
+        render_options: crate::markdown_render::MarkdownRenderOptions,
     ) -> Self {
         let rendered_lines =
             (!crate::inline_visualization::contains_inline_visualization(&markdown_source))
@@ -480,6 +498,7 @@ impl AgentMarkdownCell {
             markdown_source,
             cwd: cwd.to_path_buf(),
             inline_visualization_context,
+            render_options,
             rendered_lines,
         }
     }
@@ -487,11 +506,12 @@ impl AgentMarkdownCell {
 
 fn normalize_whitespace_only_hyperlink_lines(mut lines: Vec<HyperlinkLine>) -> Vec<HyperlinkLine> {
     for line in &mut lines {
-        if line
-            .line
-            .spans
-            .iter()
-            .all(|span| span.content.chars().all(char::is_whitespace))
+        if line.terminal_render.is_none()
+            && line
+                .line
+                .spans
+                .iter()
+                .all(|span| span.content.chars().all(char::is_whitespace))
         {
             line.line = Line::default().style(line.line.style);
             line.hyperlinks.clear();
@@ -519,12 +539,14 @@ impl HistoryCell for AgentMarkdownCell {
 
             // Re-render markdown from source at the current width. Reserve 2 columns for the "• " /
             // " " prefix prepended below.
-            let lines = crate::markdown::render_markdown_agent_with_links_cwd_and_visualizations(
-                &self.markdown_source,
-                Some(wrap_width),
-                Some(self.cwd.as_path()),
-                self.inline_visualization_context.as_ref(),
-            );
+            let lines =
+                crate::markdown::render_markdown_agent_with_links_cwd_visualizations_and_options(
+                    &self.markdown_source,
+                    Some(wrap_width),
+                    Some(self.cwd.as_path()),
+                    self.inline_visualization_context.as_ref(),
+                    self.render_options,
+                );
             normalize_whitespace_only_hyperlink_lines(prefix_hyperlink_lines(
                 lines,
                 "• ".dim(),
