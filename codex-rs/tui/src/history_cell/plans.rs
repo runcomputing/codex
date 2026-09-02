@@ -55,10 +55,24 @@ pub(crate) fn new_plan_update(update: UpdatePlanArgs) -> PlanUpdateCell {
 /// The plan body is stored as raw markdown so terminal resize reflow can render it again at the
 /// current width. Callers should use `new_proposed_plan_stream` only for transient live streaming
 /// cells, then consolidate to this source-backed cell when the plan is complete.
+#[cfg(test)]
 pub(crate) fn new_proposed_plan(plan_markdown: String, cwd: &Path) -> ProposedPlanCell {
+    new_proposed_plan_with_options(
+        plan_markdown,
+        cwd,
+        crate::markdown_render::MarkdownRenderOptions::default(),
+    )
+}
+
+pub(crate) fn new_proposed_plan_with_options(
+    plan_markdown: String,
+    cwd: &Path,
+    render_options: crate::markdown_render::MarkdownRenderOptions,
+) -> ProposedPlanCell {
     ProposedPlanCell {
         plan_markdown,
         cwd: cwd.to_path_buf(),
+        render_options,
         rendered_lines: MarkdownRenderCache::default(),
     }
 }
@@ -86,6 +100,7 @@ pub(crate) struct ProposedPlanCell {
     plan_markdown: String,
     /// Session cwd used to keep local file-link display aligned with live streamed plan rendering.
     cwd: PathBuf,
+    render_options: crate::markdown_render::MarkdownRenderOptions,
     rendered_lines: MarkdownRenderCache,
 }
 
@@ -115,11 +130,14 @@ impl HistoryCell for ProposedPlanCell {
             let mut plan_lines = vec![HyperlinkLine::new(Line::from(" "))];
             let plan_style = proposed_plan_style();
             let wrap_width = width.saturating_sub(4).max(1) as usize;
-            let mut body = crate::markdown::render_markdown_agent_with_links_and_cwd(
-                &self.plan_markdown,
-                Some(wrap_width),
-                Some(self.cwd.as_path()),
-            );
+            let mut body =
+                crate::markdown::render_markdown_agent_with_links_cwd_visualizations_and_options(
+                    &self.plan_markdown,
+                    Some(wrap_width),
+                    Some(self.cwd.as_path()),
+                    /*inline_visualization_context*/ None,
+                    self.render_options,
+                );
             if body.is_empty() {
                 body.push(HyperlinkLine::new(Line::from("(empty)".dim().italic())));
             }

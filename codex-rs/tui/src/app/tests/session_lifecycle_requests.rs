@@ -2217,6 +2217,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
         paginated_thread_id,
         crate::thread_transcript::RawReasoningVisibility::Hidden,
         Some(&app.config),
+        crate::markdown_render::MarkdownRenderOptions::for_features(&app.config.features),
     )
     .await?;
     assert!(!cells.is_empty());
@@ -2261,6 +2262,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
         legacy_thread_id,
         crate::thread_transcript::RawReasoningVisibility::Hidden,
         Some(&app.config),
+        crate::markdown_render::MarkdownRenderOptions::for_features(&app.config.features),
     )
     .await?;
     let legacy_reads = recorded_params(&requests, "thread/read");
@@ -2529,6 +2531,7 @@ async fn cold_paginated_subagent_transcript_excludes_inherited_parent_history() 
         child_thread_id,
         crate::thread_transcript::RawReasoningVisibility::Hidden,
         Some(&app.config),
+        crate::markdown_render::MarkdownRenderOptions::for_features(&app.config.features),
     )
     .await?;
     let visible_history = cells

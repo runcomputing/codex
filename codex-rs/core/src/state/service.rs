@@ -30,6 +30,7 @@ use codex_extension_api::ExtensionRegistry;
 use codex_hooks::Hooks;
 use codex_http_client::RouteAwareClientPool;
 use codex_login::AuthManager;
+use codex_mcp::McpChannelNotification;
 use codex_mcp::McpRuntime;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_otel::SessionTelemetry;
@@ -48,6 +49,7 @@ pub(crate) struct SessionServices {
     pub(crate) mcp_runtime: Arc<McpRuntime>,
     /// Immutable MCP handlers scoped to this thread's current binding.
     pub(crate) mcp_handler_cache: McpHandlerCache,
+    pub(crate) mcp_channel_tx: async_channel::Sender<McpChannelNotification>,
     pub(crate) unified_exec_manager: UnifiedExecProcessManager,
     pub(crate) elicitations: ElicitationService,
     #[cfg_attr(not(unix), allow(dead_code))]

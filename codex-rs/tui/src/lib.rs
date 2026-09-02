@@ -194,6 +194,7 @@ mod temporary_structured_request;
 mod terminal_hyperlinks;
 mod terminal_palette;
 mod terminal_probe;
+mod terminal_render;
 mod terminal_title;
 mod terminal_visualization_instructions;
 mod text_formatting;
@@ -3276,6 +3277,7 @@ mod tests {
                 thread_id,
                 crate::thread_transcript::RawReasoningVisibility::Hidden,
                 /*config*/ None,
+                crate::markdown_render::MarkdownRenderOptions::default(),
             )
             .await?;
             assert!(cells.len() > 100);

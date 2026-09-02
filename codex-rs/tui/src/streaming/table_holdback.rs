@@ -1,8 +1,11 @@
-//! Pipe-table holdback scanner for source-backed agent streams.
+//! Structural holdback scanner for source-backed agent streams.
 //!
 //! Agent streams with markdown tables keep the active table as mutable tail so
 //! adding a row can reflow earlier table rows instead of committing a stale
 //! render to scrollback.
+//!
+//! Fenced blocks are also held while open. Their provisional render changes shape as body lines
+//! arrive, and a completed Mermaid fence can change from code rows into a terminal image.
 //!
 //! The scanner is intentionally conservative: it only looks for enough
 //! structure to decide where the mutable tail should start. It does not try to
@@ -29,6 +32,8 @@ pub(super) enum TableHoldbackState {
     /// A header + delimiter pair was found -- the source contains a confirmed
     /// table. Content from the table header onward stays mutable.
     Confirmed { table_start: usize },
+    /// An open fenced block has a provisional render that can change when more lines arrive.
+    OpenFence { fence_start: usize },
 }
 
 /// Facts remembered about the previous committed source line.
@@ -54,6 +59,8 @@ pub(super) struct TableHoldbackScanner {
     previous_line: Option<PreviousLineState>,
     pending_header_start: Option<usize>,
     confirmed_table_start: Option<usize>,
+    open_fence_start: Option<usize>,
+    closed_fence_in_last_chunk: bool,
 }
 
 impl TableHoldbackScanner {
@@ -64,7 +71,14 @@ impl TableHoldbackScanner {
             previous_line: None,
             pending_header_start: None,
             confirmed_table_start: None,
+            open_fence_start: None,
+            closed_fence_in_last_chunk: false,
         }
+    }
+
+    /// Whether the most recently scanned chunk completed a fenced block.
+    pub(super) fn closed_fence_in_last_chunk(&self) -> bool {
+        self.closed_fence_in_last_chunk
     }
 
     pub(super) fn reset(&mut self) {
@@ -79,7 +93,9 @@ impl TableHoldbackScanner {
     /// and delimiter pair has been seen and all subsequent body rows remain in
     /// the live tail until finalization.
     pub(super) fn state(&self) -> TableHoldbackState {
-        if let Some(table_start) = self.confirmed_table_start {
+        if let Some(fence_start) = self.open_fence_start {
+            TableHoldbackState::OpenFence { fence_start }
+        } else if let Some(table_start) = self.confirmed_table_start {
             TableHoldbackState::Confirmed { table_start }
         } else if let Some(header_start) = self.pending_header_start {
             TableHoldbackState::PendingHeader { header_start }
@@ -96,6 +112,7 @@ impl TableHoldbackScanner {
     /// scanner never treats an unfinished table row as a stable structural
     /// signal.
     pub(super) fn push_source_chunk(&mut self, source_chunk: &str) {
+        self.closed_fence_in_last_chunk = false;
         if source_chunk.is_empty() {
             return;
         }
@@ -155,6 +172,17 @@ impl TableHoldbackScanner {
         });
 
         self.fence_tracker.advance(line);
+        let next_fence_kind = self.fence_tracker.kind();
+        match (fence_kind, next_fence_kind) {
+            (FenceKind::Outside, FenceKind::Markdown | FenceKind::Other) => {
+                self.open_fence_start = Some(source_start);
+            }
+            (FenceKind::Markdown | FenceKind::Other, FenceKind::Outside) => {
+                self.open_fence_start = None;
+                self.closed_fence_in_last_chunk = true;
+            }
+            _ => {}
+        }
         self.source_offset = self.source_offset.saturating_add(source_line.len());
     }
 }
@@ -179,32 +207,46 @@ struct ParsedLine<'a> {
 
 /// Parse source into lines tagged with fenced-code context for table scanning.
 #[cfg(test)]
-fn parse_lines_with_fence_state(source: &str) -> Vec<ParsedLine<'_>> {
+fn parse_lines_with_fence_state(source: &str) -> (Vec<ParsedLine<'_>>, Option<usize>) {
     let mut tracker = FenceTracker::new();
     let mut lines = Vec::new();
     let mut source_start = 0usize;
+    let mut open_fence_start = None;
 
     for raw_line in source.split('\n') {
+        let fence_kind = tracker.kind();
         lines.push(ParsedLine {
             text: raw_line,
-            fence_context: tracker.kind(),
+            fence_context: fence_kind,
             source_start,
         });
 
         tracker.advance(raw_line);
+        match (fence_kind, tracker.kind()) {
+            (FenceKind::Outside, FenceKind::Markdown | FenceKind::Other) => {
+                open_fence_start = Some(source_start);
+            }
+            (FenceKind::Markdown | FenceKind::Other, FenceKind::Outside) => {
+                open_fence_start = None;
+            }
+            _ => {}
+        }
         source_start = source_start
             .saturating_add(raw_line.len())
             .saturating_add(1);
     }
 
-    lines
+    (lines, open_fence_start)
 }
 
 /// Scan `source` for pipe-table patterns outside of non-markdown fenced code
 /// blocks.
 #[cfg(test)]
 pub(super) fn table_holdback_state(source: &str) -> TableHoldbackState {
-    let lines = parse_lines_with_fence_state(source);
+    let (lines, open_fence_start) = parse_lines_with_fence_state(source);
+    if let Some(fence_start) = open_fence_start {
+        return TableHoldbackState::OpenFence { fence_start };
+    }
     for pair in lines.windows(2) {
         let [header_line, delimiter_line] = pair else {
             continue;

@@ -37,6 +37,7 @@ pub(crate) async fn load_session_transcript(
     thread_id: ThreadId,
     raw_reasoning_visibility: RawReasoningVisibility,
     config: Option<&Config>,
+    render_options: crate::markdown_render::MarkdownRenderOptions,
 ) -> std::io::Result<TranscriptCells> {
     let mut thread = app_server
         .thread_read(thread_id, /*include_turns*/ false)
@@ -52,26 +53,47 @@ pub(crate) async fn load_session_transcript(
         )
         .await
         .map_err(std::io::Error::other)?;
-    Ok(thread_to_transcript_cells(
+    Ok(thread_to_transcript_cells_with_options(
         thread,
         raw_reasoning_visibility,
         config,
+        render_options,
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn thread_to_transcript_cells(
     thread: Thread,
     raw_reasoning_visibility: RawReasoningVisibility,
     config: Option<&Config>,
 ) -> TranscriptCells {
+    let render_options = config.map_or_else(
+        crate::markdown_render::MarkdownRenderOptions::default,
+        |config| crate::markdown_render::MarkdownRenderOptions::for_features(&config.features),
+    );
+    thread_to_transcript_cells_with_options(
+        thread,
+        raw_reasoning_visibility,
+        config,
+        render_options,
+    )
+}
+
+fn thread_to_transcript_cells_with_options(
+    thread: Thread,
+    raw_reasoning_visibility: RawReasoningVisibility,
+    config: Option<&Config>,
+    render_options: crate::markdown_render::MarkdownRenderOptions,
+) -> TranscriptCells {
     let cwd = thread.cwd;
     let thread_id = ThreadId::from_string(&thread.id).ok();
-    let mut cells = thread_items_to_transcript_cells(
+    let mut cells = thread_items_to_transcript_cells_with_options(
         thread_id,
         &cwd,
         thread.turns.into_iter().flat_map(|turn| turn.items),
         raw_reasoning_visibility,
         config,
+        render_options,
     );
     if cells.is_empty() {
         cells.push(Arc::new(PlainHistoryCell::new(vec![
@@ -87,6 +109,28 @@ pub(crate) fn thread_items_to_transcript_cells(
     items: impl IntoIterator<Item = ThreadItem>,
     raw_reasoning_visibility: RawReasoningVisibility,
     config: Option<&Config>,
+) -> TranscriptCells {
+    let render_options = config.map_or_else(
+        crate::markdown_render::MarkdownRenderOptions::default,
+        |config| crate::markdown_render::MarkdownRenderOptions::for_features(&config.features),
+    );
+    thread_items_to_transcript_cells_with_options(
+        thread_id,
+        cwd,
+        items,
+        raw_reasoning_visibility,
+        config,
+        render_options,
+    )
+}
+
+fn thread_items_to_transcript_cells_with_options(
+    thread_id: Option<ThreadId>,
+    cwd: &AbsolutePathBuf,
+    items: impl IntoIterator<Item = ThreadItem>,
+    raw_reasoning_visibility: RawReasoningVisibility,
+    config: Option<&Config>,
+    render_options: crate::markdown_render::MarkdownRenderOptions,
 ) -> TranscriptCells {
     let inline_visualization_context = config.and_then(|config| {
         thread_id.and_then(|thread_id| InlineVisualizationContext::from_config(config, thread_id))
@@ -128,10 +172,11 @@ pub(crate) fn thread_items_to_transcript_cells(
             ThreadItem::AgentMessage { text, .. } => {
                 let parsed = parse_assistant_markdown(&text, cwd.as_path());
                 if !parsed.visible_markdown.trim().is_empty() {
-                    cells.push(Arc::new(AgentMarkdownCell::new_with_inline_visualizations(
+                    cells.push(Arc::new(AgentMarkdownCell::new_with_render_options(
                         parsed.visible_markdown,
                         cwd.as_path(),
                         inline_visualization_context.clone(),
+                        render_options,
                     )));
                 }
             }
@@ -157,10 +202,13 @@ pub(crate) fn thread_items_to_transcript_cells(
             }
             ThreadItem::Plan { text, .. } => {
                 if !text.trim().is_empty() {
-                    cells.push(Arc::new(crate::history_cell::new_proposed_plan(
-                        text,
-                        cwd.as_path(),
-                    )));
+                    cells.push(Arc::new(
+                        crate::history_cell::new_proposed_plan_with_options(
+                            text,
+                            cwd.as_path(),
+                            render_options,
+                        ),
+                    ));
                 }
             }
             ThreadItem::Reasoning {

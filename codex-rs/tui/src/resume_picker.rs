@@ -449,6 +449,7 @@ async fn run_resume_picker_with_launch_context(
             include_non_interactive,
             raw_reasoning_visibility(config),
             (!uses_remote_workspace).then(|| config.clone()),
+            crate::markdown_render::MarkdownRenderOptions::for_features(&config.features),
             bg_tx,
         ),
         bg_rx,
@@ -503,6 +504,7 @@ pub async fn run_fork_picker_with_app_server(
             /*include_non_interactive*/ false,
             raw_reasoning_visibility(config),
             (!uses_remote_workspace).then(|| config.clone()),
+            crate::markdown_render::MarkdownRenderOptions::for_features(&config.features),
             bg_tx,
         ),
         bg_rx,
@@ -656,6 +658,7 @@ fn spawn_app_server_page_loader(
     include_non_interactive: bool,
     raw_reasoning_visibility: RawReasoningVisibility,
     config: Option<Config>,
+    render_options: crate::markdown_render::MarkdownRenderOptions,
     bg_tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) -> PickerLoader {
     let (request_tx, mut request_rx) = mpsc::unbounded_channel::<PickerLoadRequest>();
@@ -697,6 +700,7 @@ fn spawn_app_server_page_loader(
                             thread_id,
                             raw_reasoning_visibility,
                             config.as_ref(),
+                            render_options,
                         ) => {
                             let _ = bg_tx.send(BackgroundEvent::Transcript {
                                 thread_id,

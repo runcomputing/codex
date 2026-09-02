@@ -3,7 +3,10 @@
 use super::transcript::ActiveCellLayoutCache;
 use super::transcript::ActiveCellLayoutCacheKey;
 use super::*;
-use crate::terminal_hyperlinks::HyperlinkParagraph;
+use crate::terminal_hyperlinks::mark_buffer_hyperlinks;
+use crate::terminal_hyperlinks::visible_lines_ref;
+use crate::terminal_render::mark_buffer_terminal_rendering;
+use ratatui::text::Text;
 use std::cell::Cell;
 
 impl ChatWidget {
@@ -113,8 +116,9 @@ struct PersistentActiveCellLayout<'a> {
 impl Renderable for TranscriptAreaRenderable<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let area = self.child_area(area);
-        let lines = self.child.display_hyperlink_lines(area.width);
-        let paragraph = HyperlinkParagraph::new(&lines, Style::default());
+        let hyperlink_lines = self.child.display_hyperlink_lines(area.width);
+        let lines = visible_lines_ref(&hyperlink_lines);
+        let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
         let y = if area.height == 0 {
             0
         } else {
@@ -134,7 +138,9 @@ impl Renderable for TranscriptAreaRenderable<'_> {
             u16::try_from(overflow).unwrap_or(u16::MAX)
         };
         Clear.render(area, buf);
-        paragraph.scroll(y).render(area, buf);
+        paragraph.scroll((y, 0)).render(area, buf);
+        mark_buffer_terminal_rendering(buf, area, &hyperlink_lines, usize::from(y));
+        mark_buffer_hyperlinks(buf, area, &hyperlink_lines, usize::from(y));
     }
 
     fn desired_height(&self, width: u16) -> u16 {
@@ -154,6 +160,10 @@ impl Renderable for TranscriptAreaRenderable<'_> {
         desired_height + self.top
     }
 }
+
+#[cfg(test)]
+#[path = "rendering_tests.rs"]
+mod tests;
 
 impl TranscriptAreaRenderable<'_> {
     fn layout(

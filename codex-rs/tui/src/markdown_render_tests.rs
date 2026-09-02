@@ -8,15 +8,37 @@ use std::path::Path;
 
 use crate::markdown_render::COLON_LOCATION_SUFFIX_RE;
 use crate::markdown_render::HASH_LOCATION_SUFFIX_RE;
+use crate::markdown_render::HeadingRender;
 use crate::markdown_render::render_markdown_lines_with_width_and_cwd;
+use crate::markdown_render::render_markdown_lines_with_options;
 use crate::markdown_render::render_markdown_text;
 use crate::markdown_render::render_markdown_text_with_width;
 use crate::markdown_render::render_markdown_text_with_width_and_cwd;
+use crate::markdown_render::MarkdownRenderOptions;
+use crate::markdown::render_markdown_agent_with_links_cwd_visualizations_and_options;
+use crate::terminal_render::TerminalLineRender;
+use codex_features::Feature;
+use codex_features::Features;
 use insta::assert_debug_snapshot;
 use insta::assert_snapshot;
 
 fn render_markdown_text_for_cwd(input: &str, cwd: &Path) -> Text<'static> {
     render_markdown_text_with_width_and_cwd(input, /*width*/ None, Some(cwd))
+}
+
+#[test]
+fn rich_markdown_rendering_requires_the_feature() {
+    let mut features = Features::with_defaults();
+    assert_eq!(
+        MarkdownRenderOptions::for_features(&features),
+        MarkdownRenderOptions::default()
+    );
+
+    features.enable(Feature::RichMarkdown);
+    assert_eq!(
+        MarkdownRenderOptions::for_features(&features),
+        MarkdownRenderOptions::text_sizing_for_test()
+    );
 }
 
 fn plain_lines(text: &Text<'_>) -> Vec<String> {
@@ -29,6 +51,293 @@ fn plain_lines(text: &Text<'_>) -> Vec<String> {
                 .collect::<String>()
         })
         .collect()
+}
+
+#[test]
+fn rich_terminal_markdown_snapshot() {
+    let lines = render_markdown_lines_with_options(
+        "# H1\n\n## H2\n\n### H3\n\n#### H4\n\n##### H5\n\n###### H6\n\n```rust\nlet answer = 42;\n```",
+        /*width*/ Some(40),
+        /*cwd*/ None,
+        &|_| false,
+        MarkdownRenderOptions {
+            rich_text: true,
+            heading_render: HeadingRender::Image,
+            mermaid_images: false,
+        },
+    );
+    let summary = lines
+        .iter()
+        .map(|line| {
+            let visible = line
+                .line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            let render = match &line.terminal_render {
+                Some(TerminalLineRender::ScaledText {
+                    columns,
+                    text,
+                    scale,
+                }) => format!("scaled {scale}x {columns:?} {text:?}"),
+                Some(TerminalLineRender::Reserved { columns }) => {
+                    format!("reserved {columns:?}")
+                }
+                Some(TerminalLineRender::Image { columns, image }) => {
+                    format!("image {columns:?}x{}", image.size().height)
+                }
+                Some(TerminalLineRender::ImageRow { columns, row, .. }) => {
+                    format!("image row {row} {columns:?}")
+                }
+                None => "plain".to_string(),
+            };
+            format!("{:?} | {render}", visible.trim_end())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_snapshot!(summary);
+}
+
+#[test]
+fn text_sizing_heading_uses_osc66_metadata() {
+    let lines = render_markdown_lines_with_options(
+        "# Title",
+        /*width*/ Some(40),
+        /*cwd*/ None,
+        &|_| false,
+        MarkdownRenderOptions {
+            rich_text: true,
+            heading_render: HeadingRender::TextSizing,
+            mermaid_images: false,
+        },
+    );
+
+    assert!(matches!(
+        lines.first().and_then(|line| line.terminal_render.as_ref()),
+        Some(TerminalLineRender::ScaledText { scale: 6, .. })
+    ));
+}
+
+#[test]
+fn image_headings_use_a_decreasing_scale_hierarchy() {
+    let lines = render_markdown_lines_with_options(
+        "# H1\n## H2\n### H3\n#### H4\n##### H5\n###### H6",
+        /*width*/ Some(40),
+        /*cwd*/ None,
+        &|_| false,
+        MarkdownRenderOptions {
+            rich_text: true,
+            heading_render: HeadingRender::Image,
+            mermaid_images: false,
+        },
+    );
+    let image_sizes = lines
+        .iter()
+        .filter_map(|line| match line.terminal_render.as_ref() {
+            Some(TerminalLineRender::Image { image, .. }) => Some(image.size()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        image_sizes,
+        [
+            ratatui::layout::Size::new(/*width*/ 12, /*height*/ 6),
+            ratatui::layout::Size::new(/*width*/ 10, /*height*/ 5),
+            ratatui::layout::Size::new(/*width*/ 8, /*height*/ 4),
+            ratatui::layout::Size::new(/*width*/ 6, /*height*/ 3),
+            ratatui::layout::Size::new(/*width*/ 4, /*height*/ 2),
+            ratatui::layout::Size::new(/*width*/ 4, /*height*/ 2),
+        ]
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| matches!(line.terminal_render, Some(TerminalLineRender::ImageRow { .. })))
+            .count(),
+        16
+    );
+}
+
+#[test]
+fn markdown_fence_keeps_heading_literal_while_bare_heading_uses_rich_renderer() {
+    let options = MarkdownRenderOptions {
+        rich_text: true,
+        heading_render: HeadingRender::Image,
+        mermaid_images: false,
+    };
+    let bare = render_markdown_lines_with_options(
+        "# Heading 1",
+        /*width*/ Some(80),
+        /*cwd*/ None,
+        &|_| false,
+        options,
+    );
+    let fenced = render_markdown_lines_with_options(
+        "```markdown\n# Heading 1\n```",
+        /*width*/ Some(80),
+        /*cwd*/ None,
+        &|_| false,
+        options,
+    );
+
+    assert!(bare.iter().any(|line| matches!(
+        line.terminal_render,
+        Some(TerminalLineRender::Image { .. })
+    )));
+    assert!(
+        fenced
+            .iter()
+            .all(|line| line.terminal_render.is_none())
+    );
+    assert!(fenced.iter().any(|line| {
+        line.line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+            .contains("# Heading 1")
+    }));
+}
+
+#[test]
+fn triple_markdown_envelope_restores_kitty_and_ghostty_heading_modes() {
+    let source = "```markdown\n# Heading 1\n\n## Heading 2\n\n### Heading 3\n\n#### Heading 4\n\n##### Heading 5\n\n###### Heading 6\n\n```rust\nfn main() {}\n```\n\n```mermaid\nflowchart LR; A-->B\n```\n```";
+    let render = |heading_render| {
+        render_markdown_agent_with_links_cwd_visualizations_and_options(
+            source,
+            /*width*/ Some(80),
+            /*cwd*/ None,
+            /*inline_visualization_context*/ None,
+            MarkdownRenderOptions {
+                rich_text: true,
+                heading_render,
+                mermaid_images: true,
+            },
+        )
+    };
+    let kitty = render(HeadingRender::TextSizing);
+    let ghostty = render(HeadingRender::Image);
+
+    let terminal_render_counts = |lines: &[crate::terminal_hyperlinks::HyperlinkLine]| {
+        let scaled = lines
+            .iter()
+            .filter(|line| matches!(line.terminal_render, Some(TerminalLineRender::ScaledText { .. })))
+            .count();
+        let images = lines
+            .iter()
+            .filter(|line| matches!(line.terminal_render, Some(TerminalLineRender::Image { .. })))
+            .count();
+        (scaled, images)
+    };
+    let visible_text = |lines: &[crate::terminal_hyperlinks::HyperlinkLine]| {
+        lines
+            .iter()
+            .flat_map(|line| &line.line.spans)
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+
+    assert_eq!(terminal_render_counts(&kitty), (6, 1));
+    assert_eq!(terminal_render_counts(&ghostty), (0, 7));
+    for text in [visible_text(&kitty), visible_text(&ghostty)] {
+        assert!(!text.contains("# Heading"));
+        assert!(!text.contains("```rust"));
+        assert!(!text.contains("```markdown"));
+    }
+    assert_snapshot!(
+        "triple_markdown_envelope_terminal_heading_modes",
+        format!(
+            "kitty: {:?}\nghostty: {:?}",
+            terminal_render_counts(&kitty),
+            terminal_render_counts(&ghostty)
+        )
+    );
+}
+
+#[test]
+fn completed_mermaid_fence_becomes_a_kitty_image() {
+    let lines = render_markdown_lines_with_options(
+        "```mermaid\nflowchart LR; A-->B\n```",
+        /*width*/ Some(40),
+        /*cwd*/ None,
+        &|_| false,
+        MarkdownRenderOptions {
+            rich_text: false,
+            heading_render: HeadingRender::Plain,
+            mermaid_images: true,
+        },
+    );
+
+    let Some(TerminalLineRender::Image { columns, image }) =
+        lines.iter().find_map(|line| line.terminal_render.as_ref())
+    else {
+        panic!("expected a rendered Mermaid image");
+    };
+    assert!((1..=40).contains(&columns.end));
+    assert!(image.size().height >= 1);
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| matches!(line.terminal_render, Some(TerminalLineRender::ImageRow { .. })))
+            .count(),
+        usize::from(image.size().height).saturating_sub(1)
+    );
+}
+
+#[test]
+fn open_mermaid_fence_streams_as_code_without_rendering() {
+    for source in [
+        "```mermaid\nflowchart LR; A-->B\n",
+        "```mermaid\nflowchart LR; A-->B",
+        "```mermaid\nflowchart LR; A-->B\n``",
+    ] {
+        let lines = render_markdown_lines_with_options(
+            source,
+            /*width*/ Some(40),
+            /*cwd*/ None,
+            &|_| false,
+            MarkdownRenderOptions {
+                rich_text: false,
+                heading_render: HeadingRender::Plain,
+                mermaid_images: true,
+            },
+        );
+
+        assert!(
+            lines.iter().all(|line| line.terminal_render.is_none()),
+            "unterminated fence {source:?} must not rasterize a provisional Mermaid image"
+        );
+        assert!(plain_lines(&Text::from(
+            lines.into_iter().map(|line| line.line).collect::<Vec<_>>()
+        ))
+        .join("\n")
+        .contains("flowchart LR; A-->B"));
+    }
+}
+
+#[test]
+fn mermaid_without_a_known_width_falls_back_to_code() {
+    let lines = render_markdown_lines_with_options(
+        "```mermaid\nflowchart LR; A-->B\n```",
+        /*width*/ None,
+        /*cwd*/ None,
+        &|_| false,
+        MarkdownRenderOptions {
+            rich_text: false,
+            heading_render: HeadingRender::Plain,
+            mermaid_images: true,
+        },
+    );
+
+    assert!(lines.iter().all(|line| line.terminal_render.is_none()));
+    assert!(plain_lines(&Text::from(
+        lines.into_iter().map(|line| line.line).collect::<Vec<_>>()
+    ))
+    .join("\n")
+    .contains("flowchart LR; A-->B"));
 }
 
 #[test]
