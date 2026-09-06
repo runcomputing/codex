@@ -2863,6 +2863,15 @@ impl App {
                 self.chat_widget.set_status_line_git_summary(cwd, summary);
                 self.refresh_status_line();
             }
+            AppEvent::StatusLineCommandUpdated { request_id, output } => {
+                if self
+                    .chat_widget
+                    .set_status_line_command_output(request_id, output)
+                {
+                    self.refresh_status_line();
+                    tui.frame_requester().schedule_frame();
+                }
+            }
             AppEvent::StatusLineWorkspaceHeadlineUpdated { request_id, result } => {
                 if self
                     .chat_widget
