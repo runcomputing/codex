@@ -1,0 +1,116 @@
+name: mirror-upstream
+
+# Keep the fork in sync with openai/codex. Our additive `extras/` overlay (plus this
+# workflow) lives as a SINGLE commit on top of upstream `main`; each run rebases that
+# commit onto upstream's latest main and copies upstream's recent rust-v* release tags.
+# Everything is done through the GitHub API — no checkout, no merge commits. Upstream
+# never writes our paths, so the rebase never conflicts.
+#
+# The only job that runs in this fork is this syncer. Every other file under upstream's
+# .github/workflows/ is dropped from the synced tree (not merely disabled) so there is
+# nothing left for GitHub to trigger — see the rebase step below.
+#
+# The default GITHUB_TOKEN is read-only here (org policy), so writes use a repo secret
+# MIRROR_TOKEN (a token with contents:write on this fork).
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # daily, ~07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-upstream
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.MIRROR_TOKEN || github.token }}
+      FORK: runcomputing/codex
+      UPSTREAM: openai/codex
+    steps:
+      - name: Rebase the extras overlay onto upstream main
+        run: |
+          set -euo pipefail
+          up=$(gh api "repos/$UPSTREAM/git/ref/heads/main" --jq '.object.sha')
+          up_tree=$(gh api "repos/$UPSTREAM/git/commits/$up" --jq '.tree.sha')
+
+          fork_main=$(gh api "repos/$FORK/git/ref/heads/main" --jq '.object.sha')
+          cur_parent=$(gh api "repos/$FORK/git/commits/$fork_main" --jq '.parents[0].sha // ""')
+          if [ "$cur_parent" = "$up" ]; then
+            echo "main already rebased on upstream $up"
+          else
+            # Our overlay = the extras/ tree + this workflow, read from the current fork
+            # main so any edits to extras/ are carried forward automatically.
+            fork_tree=$(gh api "repos/$FORK/git/commits/$fork_main" --jq '.tree.sha')
+            overlay=$(gh api "repos/$FORK/git/trees/$fork_tree?recursive=1" \
+              --jq '[ .tree[]
+                      | select(.type=="blob")
+                      | select((.path|startswith("extras/")) or (.path==".github/workflows/mirror-upstream.yml"))
+                      | {path, mode, type, sha} ]')
+
+            # Drop every file under upstream's .github/workflows/ except this syncer
+            # (sha:null deletes a path against base_tree). We do this instead of only
+            # relying on the disable-via-API step below: a workflow file that still
+            # exists is briefly "active" again whenever upstream adds or renames one,
+            # and reusable `uses:` calls into a disabled workflow aren't blocked at
+            # all. Deleting the files means there is nothing left to trigger.
+            removals=$(gh api "repos/$UPSTREAM/git/trees/$up_tree?recursive=1" \
+              --jq '[ .tree[]
+                      | select(.type=="blob")
+                      | select(.path|startswith(".github/workflows/"))
+                      | {path, mode, type, sha: null} ]')
+
+            new_tree=$(jq -nc --arg base "$up_tree" --argjson rm "$removals" --argjson ov "$overlay" \
+                '{base_tree:$base, tree:($rm + $ov)}' \
+              | gh api "repos/$FORK/git/trees" --input - --jq '.sha')
+            new_commit=$(gh api "repos/$FORK/git/commits" \
+              -f message="sync: upstream main + runcomputing extras overlay" \
+              -f tree="$new_tree" -f "parents[]=$up" --jq '.sha')
+            gh api --method PATCH "repos/$FORK/git/refs/heads/main" \
+              -f sha="$new_commit" -F force=true --jq '.object.sha'
+            echo "main -> $new_commit (extras overlay on upstream $up, other workflows stripped)"
+          fi
+
+      - name: Copy recent upstream rust-v* release tags
+        run: |
+          set -euo pipefail
+          have=$(gh api --paginate "repos/$FORK/tags" --jq '.[].name' | sort -u)
+          # Most recent 40 rust-v* release tags (sliced inside jq — piping to `head`
+          # under `set -o pipefail` would SIGPIPE gh and fail the step).
+          tags=$(gh api 'repos/openai/codex/releases?per_page=100' \
+            --jq '[.[] | select(.tag_name | startswith("rust-v")) | .tag_name][0:40][]')
+          while read -r t; do
+            [ -n "$t" ] || continue
+            grep -qxF "$t" <<<"$have" && continue
+            sha=$(gh api "repos/$UPSTREAM/git/ref/tags/$t" --jq '.object.sha' 2>/dev/null || echo "")
+            [ -n "$sha" ] || continue
+            if gh api --method POST "repos/$FORK/git/refs" -f ref="refs/tags/$t" -f sha="$sha" >/dev/null 2>&1; then
+              echo "added tag $t"
+            fi
+          done <<<"$tags"
+          echo "tag sync done"
+
+      - name: Disable upstream workflows (keep only the mirror)
+        run: |
+          set -euo pipefail
+          # Backstop for the tree-stripping above: GitHub keeps a workflow's run
+          # history (and its registry entry) even after the defining file is
+          # deleted, and may briefly leave it "active" right after a sync. Disable
+          # anything still active except this mirror. GitHub's auto dependency-graph
+          # workflow can't be disabled (422) — that's a platform feature, not a file
+          # we control.
+          gh api --paginate "repos/$FORK/actions/workflows" \
+            --jq '.workflows[] | select(.state=="active") | select(.path|endswith("mirror-upstream.yml")|not) | "\(.id)\t\(.name)"' \
+          | while IFS=$'\t' read -r id name; do
+              if gh api --method PUT "repos/$FORK/actions/workflows/$id/disable" >/dev/null 2>&1; then
+                echo "disabled: $name"
+              else
+                echo "skip (undisableable): $name"
+              fi
+            done
+          echo "workflow cleanup done"
