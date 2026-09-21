@@ -156,7 +156,8 @@ impl Session {
                     )
                 })
                 .collect(),
-        );
+        )
+        .with_thread_id(self.thread_id().to_string());
         (mcp_config, runtime_context)
     }
 
