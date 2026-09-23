@@ -156,7 +156,8 @@ impl Session {
         .with_selected_environments(
             environment_selections.into(),
             environments.ready_environment_handles(),
-        );
+        )
+        .with_thread_id(self.thread_id().to_string());
         (mcp_config, runtime_context)
     }
 

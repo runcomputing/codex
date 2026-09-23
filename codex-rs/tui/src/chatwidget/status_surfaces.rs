@@ -90,6 +90,11 @@ impl StatusSurfaceSelections {
             )
         })
     }
+
+    fn uses_custom_command(&self) -> bool {
+        self.status_line_items
+            .contains(&StatusLineItem::CustomCommand)
+    }
 }
 
 /// Cached project-root display name keyed by the cwd used for the last lookup.
@@ -197,6 +202,8 @@ impl ChatWidget {
         } else {
             self.cancel_thread_usage_polling();
         }
+
+        self.sync_status_line_command_state(selections.uses_custom_command());
     }
 
     fn refresh_status_line_from_selections(&mut self, selections: &StatusSurfaceSelections) {
@@ -488,7 +495,7 @@ impl ChatWidget {
             })
     }
 
-    fn status_line_cwd(&self) -> &Path {
+    pub(super) fn status_line_cwd(&self) -> &Path {
         self.current_cwd
             .as_deref()
             .unwrap_or(self.config.cwd.as_path())
@@ -823,6 +830,7 @@ impl ChatWidget {
                 .or_else(|| self.thread_id.map(|id| id.to_string())),
             StatusLineItem::WorkspaceHeadline => self.status_line_workspace_headline.clone(),
             StatusLineItem::TaskProgress => self.terminal_title_task_progress(),
+            StatusLineItem::CustomCommand => self.status_line_command_output.clone(),
         }
     }
 
@@ -870,6 +878,7 @@ impl ChatWidget {
             StatusSurfacePreviewItem::Model => StatusLineItem::ModelName,
             StatusSurfacePreviewItem::ModelWithReasoning => StatusLineItem::ModelWithReasoning,
             StatusSurfacePreviewItem::Reasoning => StatusLineItem::Reasoning,
+            StatusSurfacePreviewItem::CustomCommand => StatusLineItem::CustomCommand,
         };
         self.status_line_value_for_item(status_line_item)
     }

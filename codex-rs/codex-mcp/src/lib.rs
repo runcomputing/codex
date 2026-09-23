@@ -1,5 +1,8 @@
 pub use binding::McpBinding;
 pub use binding::PreparedMcpCall;
+pub use channel::MCP_CHANNEL_CAPABILITY;
+pub use channel::MCP_CHANNEL_NOTIFICATION_METHOD;
+pub use channel::McpChannelNotification;
 pub use client_capabilities::client_mcp_extensions;
 pub use client_tool_catalog::CodexAppsToolSnapshot;
 pub use codex_rmcp_client::McpProtocolMode;
@@ -105,6 +108,7 @@ pub(crate) mod auth_elicitation;
 mod binding;
 pub(crate) mod binding_clients;
 mod catalog;
+pub(crate) mod channel;
 mod client_capabilities;
 mod client_tool_catalog;
 pub(crate) mod codex_apps;
