@@ -177,6 +177,7 @@ async fn ordinary_elicitations_release_pending_responses_on_cancellation() -> an
                 route_tx.send(response_tx).expect("observe elicitation");
                 Box::pin(async move { Ok(response_rx.await?) })
             }),
+            /*send_custom_notification*/ None,
             pause_state,
         );
         let (client_transport, server_transport) = tokio::io::duplex(/*max_buf_size*/ 4096);
@@ -262,6 +263,7 @@ async fn user_verification_service_cancellation_drops_pending_response() -> anyh
                 .expect("observe pending verification");
             Box::pin(async move { Ok(response_rx.await?) })
         }),
+        /*send_custom_notification*/ None,
         pause_state,
     );
     let (client_transport, server_transport) = tokio::io::duplex(/*max_buf_size*/ 4096);
@@ -321,6 +323,7 @@ async fn cancelling_one_verification_leaves_the_mcp_connection_and_other_request
                 .expect("observe verification");
             Box::pin(async move { Ok(response_rx.await?) })
         }),
+        /*send_custom_notification*/ None,
         pause_state,
     );
     let (client_transport, server_transport) = tokio::io::duplex(/*max_buf_size*/ 4096);

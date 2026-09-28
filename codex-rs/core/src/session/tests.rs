@@ -6221,6 +6221,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         model_info,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
+        /*mcp_channel_tx*/ async_channel::unbounded().0,
         agent_status_tx,
         InitialHistory::New,
         ForkPersistence::Copied,
@@ -6479,6 +6480,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let services = SessionServices {
         mcp_runtime,
         mcp_handler_cache: Default::default(),
+        mcp_channel_tx: async_channel::unbounded().0,
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,
         ),
@@ -6769,6 +6771,7 @@ async fn make_session_with_config_and_rx(
         model_info,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
+        /*mcp_channel_tx*/ async_channel::unbounded().0,
         agent_status_tx,
         InitialHistory::New,
         ForkPersistence::Copied,
@@ -6901,6 +6904,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         model_info,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
+        /*mcp_channel_tx*/ async_channel::unbounded().0,
         agent_status_tx,
         initial_history,
         ForkPersistence::Copied,
@@ -8751,6 +8755,7 @@ where
     let services = SessionServices {
         mcp_runtime,
         mcp_handler_cache: Default::default(),
+        mcp_channel_tx: async_channel::unbounded().0,
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,
         ),
