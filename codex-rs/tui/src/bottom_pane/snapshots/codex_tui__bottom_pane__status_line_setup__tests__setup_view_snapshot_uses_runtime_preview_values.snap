@@ -1,5 +1,6 @@
 ---
 source: tui/src/bottom_pane/status_line_setup.rs
+assertion_line: 736
 expression: "render_lines(&view, 72)"
 ---
                                                                         
@@ -13,9 +14,9 @@ expression: "render_lines(&view, 72)"
   [x] model                 Current model name                          
   [x] current-dir           Current working directory                   
   [x] git-branch            Current Git branch (omitted when unavailabl…
+  [x] custom-command        Output from the configured external status-…
   [ ] model-with-reasoning  Current model name with reasoning level     
   [ ] reasoning             Current reasoning level                     
-  [ ] project-name          Project name (omitted when unavailable)     
 ↓                                                                       
-  gpt-5-codex · ~/codex-rs · jif/statusline-preview                     
+  gpt-5-codex · ~/codex-rs · jif/statusline-preview · custom:status     
   space toggle · ←/→ reorder · enter save · esc cancel
