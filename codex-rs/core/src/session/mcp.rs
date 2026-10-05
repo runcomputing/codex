@@ -175,6 +175,7 @@ impl Session {
             environments.all_selections().into(),
             environments.ready_environment_handles(),
         )
+        .with_thread_id(self.thread_id().to_string())
     }
 
     pub(crate) async fn runtime_mcp_servers(
